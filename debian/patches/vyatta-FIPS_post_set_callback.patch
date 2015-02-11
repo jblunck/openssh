@@ -1,0 +1,402 @@
+--- /dev/null
++++ b/fips.c
+@@ -0,0 +1,237 @@
++#include <stdio.h>
++#include <string.h>
++#include <dlfcn.h>
++
++#include "log.h"
++
++#ifdef OPENSSL_FIPS_CAPABLE
++#include <openssl/fips.h>
++#include <openssl/evp.h>
++#include <openssl/objects.h>
++
++/* get rid of FIPS renames */
++#ifdef OPENSSL_FIPSCANISTER
++#undef EC_KEY_get0_group
++#undef EC_GROUP_get_curve_name
++#endif
++
++#include <openssl/ec.h>
++
++static LogLevel _openssl_post_printer_level = SYSLOG_LEVEL_VERBOSE;
++
++static void _openssl_post_printer(const char *str)
++{
++	char *str2 = strdup(str);
++	char *r, *s = str2;
++
++	while ((r = strchr(s, '\n')) != NULL) {
++		*r = '\0';
++		do_log2(_openssl_post_printer_level, "%s", s);
++		s = ++r;
++	}
++
++	if (strlen(s))
++		do_log2(_openssl_post_printer_level, "%s", s);
++
++	free(str2);
++}
++
++/*
++ * Helper to output the FIPS POST message buffer from OpenSSL to our log.
++ */
++void fips_post_print(LogLevel level)
++{
++	void *main_handle = dlopen(NULL, RTLD_GLOBAL);
++	void (*fn)(void (*)(const char *));
++
++	*(void**)(&fn) = dlsym(main_handle, "FIPS_post_print_msgbuf");
++	if (fn) {
++		_openssl_post_printer_level = level;
++		(*fn)(_openssl_post_printer);
++	}
++	/* Don't dlclose(main_handle); */
++}
++
++#define DRBG_FLAG_CTR_USE_DF 0x1
++
++int openssl_post_cb(int op, int id, int subid, void *ex)
++{
++	const char *idstr, *exstr = "";
++	char asctmp[20];
++	int keytype = -1;
++
++	switch(id) {
++	case FIPS_TEST_INTEGRITY:
++		idstr = "Integrity";
++		break;
++
++	case FIPS_TEST_DIGEST:
++		idstr = "Digest";
++		exstr = OBJ_nid2sn(subid);
++		break;
++
++	case FIPS_TEST_CIPHER:
++		idstr = "Cipher";
++		exstr = OBJ_nid2sn(subid);
++		break;
++
++	case FIPS_TEST_SIGNATURE:
++		idstr = "Signature";
++		if (ex)
++		{
++			EVP_PKEY *pkey = ex;
++			keytype = pkey->type;
++			if (keytype == EVP_PKEY_EC)
++			{
++				const EC_GROUP *grp;
++				int cnid;
++				grp = EC_KEY_get0_group(pkey->pkey.ec);
++				cnid = EC_GROUP_get_curve_name(grp);
++				snprintf(asctmp, sizeof(asctmp),"ECDSA %s",
++					OBJ_nid2sn(cnid));
++				exstr = asctmp;
++			}
++			else
++				exstr = OBJ_nid2sn(keytype);
++		}
++		break;
++
++	case FIPS_TEST_HMAC:
++		idstr = "HMAC";
++		exstr = OBJ_nid2sn(subid);
++		break;
++
++	case FIPS_TEST_CMAC:
++		idstr = "CMAC";
++		exstr = OBJ_nid2sn(subid);
++		break;
++
++	case FIPS_TEST_GCM:
++		idstr = "GCM";
++		break;
++
++	case FIPS_TEST_XTS:
++		idstr = "XTS";
++		exstr = OBJ_nid2sn(subid);
++		break;
++
++	case FIPS_TEST_CCM:
++		idstr = "CCM";
++		break;
++
++	case FIPS_TEST_X931:
++		idstr = "X9.31 PRNG";
++		snprintf(asctmp, sizeof(asctmp), "keylen=%d", subid);
++		exstr = asctmp;
++		break;
++
++	case FIPS_TEST_DRBG:
++		idstr = "DRBG";
++		if (*(int *)ex & DRBG_FLAG_CTR_USE_DF)
++		{
++			snprintf(asctmp, sizeof(asctmp), "%s DF",
++				OBJ_nid2sn(subid));
++			exstr = asctmp;
++		}
++		else if (subid >> 16)
++		{
++			snprintf(asctmp, sizeof(asctmp), "%s %s",
++				OBJ_nid2sn(subid >> 16),
++				OBJ_nid2sn(subid & 0xFFFF));
++			exstr = asctmp;
++		}
++		else
++			exstr = OBJ_nid2sn(subid);
++		break;
++
++	case FIPS_TEST_PAIRWISE:
++		idstr = "Pairwise Consistency";
++		if (ex)
++		{
++			EVP_PKEY *pkey = ex;
++			keytype = pkey->type;
++			exstr = OBJ_nid2sn(keytype);
++		}
++		break;
++
++	case FIPS_TEST_CONTINUOUS:
++		idstr = "Continuous PRNG";
++		break;
++
++	case FIPS_TEST_ECDH:
++		idstr = "ECDH";
++		exstr = OBJ_nid2sn(subid);
++		break;
++
++	default:
++		idstr = "Unknown";
++		break;
++	}
++
++	switch(op)
++	{
++	case FIPS_POST_BEGIN:
++		logit("OpenSSL FIPS POST started\n");
++		break;
++
++	case FIPS_POST_END:
++		logit("OpenSSL FIPS POST %s\n", id ? "Success" : "Failed");
++		break;
++
++	case FIPS_POST_STARTED:
++		verbose("\t%s%s%s test started", idstr,
++			exstr[0] != '\0' ? " " : "", exstr);
++		break;
++
++	case FIPS_POST_SUCCESS:
++		verbose("\t%s%s%s test OK", idstr,
++			exstr[0] != '\0' ? " " : "", exstr);
++		break;
++
++	case FIPS_POST_FAIL:
++		verbose("\t%s%s%s test Failed!!", idstr,
++			exstr[0] != '\0' ? " " : "", exstr);
++		break;
++
++	case FIPS_POST_CORRUPT:
++	{
++		char tmp[80];
++		static char *failtest = NULL;
++		if (!failtest) {
++			char *env = getenv("OPENSSL_FIPS_FAILTEST");
++			failtest = env ? env : "";
++		}
++
++		snprintf(tmp, sizeof(tmp), "%s%s%s", idstr,
++			exstr[0] != '\0' ? " " : "", exstr);
++
++		if (strcmp(failtest, tmp) == 0)
++			return 0;
++		break;
++	}
++	}
++
++	return 1;
++}
++
++typedef void (*FIPS_post_set_callback_func)(
++	int (*post_cb)(int op, int id, int subid, void *ex));
++
++/*
++ * Register a callback with FIPS selftests so that we can log some information
++ * if something goes south.
++ */
++void register_fips_post_callback()
++{
++	void *main_handle = dlopen(NULL, RTLD_GLOBAL);
++	FIPS_post_set_callback_func func;
++
++	*(void**)(&func) = dlsym(main_handle, "FIPS_post_set_callback");
++	if (func)
++		(*func)(openssl_post_cb);
++	else
++		debug("FIPS POST callback not registered with OpenSSL!\n");
++	/* Don't dlclose(main_handle); */
++}
++
++#endif
+--- a/ssh.c
++++ b/ssh.c
+@@ -109,6 +109,12 @@
+ #include "ssh-pkcs11.h"
+ #endif
+ 
++#ifdef OPENSSL_FIPS_CAPABLE
++extern void register_fips_post_callback();
++extern void fips_post_print(LogLevel level);
++#endif
++
++
+ extern char *__progname;
+ 
+ /* Saves a copy of argv for setproctitle emulation */
+@@ -733,6 +739,8 @@
+ 	log_init(argv0, options.log_level, SYSLOG_FACILITY_USER, !use_syslog);
+ 
+ #ifdef OPENSSL_FIPS_CAPABLE
++	register_fips_post_callback();
++
+ 	/* note: OpenSSL itself uses OPENSSL_FIPS to indicate
+ 	 *       wanting to run in FIPS mode
+ 	 */
+@@ -838,6 +846,7 @@
+ 		options.protocol &= SSH_PROTO_2;
+ 		if (options.protocol == 0)
+ 			fatal("Protocol 2 disabled by configuration but required by FIPS mode");
++		fips_post_print(SYSLOG_LEVEL_VERBOSE);
+ 		logit("FIPS mode initialized");
+ 	}
+ #endif /* OPENSSL_FIPS_CAPABLE */
+--- a/sshd.c
++++ b/sshd.c
+@@ -144,6 +144,11 @@
+ #define REEXEC_CONFIG_PASS_FD		(STDERR_FILENO + 3)
+ #define REEXEC_MIN_FREE_FD		(STDERR_FILENO + 4)
+ 
++#ifdef OPENSSL_FIPS_CAPABLE
++extern void register_fips_post_callback();
++extern void fips_post_print(LogLevel level);
++#endif
++
+ extern char *__progname;
+ 
+ /* Server configuration options. */
+@@ -1562,6 +1567,8 @@
+ 	fill_default_server_options(&options);
+ 
+ #ifdef OPENSSL_FIPS_CAPABLE
++	register_fips_post_callback();
++
+ 	/* note: there should be a command line option to indicate FIPS140
+ 	 *       mode; however OpenSSL itself uses OPENSSL_FIPS to indicate
+ 	 *       wanting to run in FIPS mode
+@@ -1813,6 +1820,7 @@
+ 
+ #ifdef OPENSSL_FIPS_CAPABLE
+ 	if (FIPS_mode()) {
++		fips_post_print(SYSLOG_LEVEL_INFO);
+ 		logit("FIPS mode initialized");
+ 	}
+ #endif /* OPENSSL_FIPS_CAPABLE */
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -43,6 +43,7 @@
+ LD=@LD@
+ CFLAGS=@CFLAGS@
+ CPPFLAGS=-I. -I$(srcdir) @CPPFLAGS@ $(PATHS) @DEFS@
++FIPS_CPPFLAGS=@FIPS_CPPFLAGS@
+ LIBS=@LIBS@
+ SSHLIBS=@SSHLIBS@
+ SSHDLIBS=@SSHDLIBS@
+@@ -76,7 +77,7 @@
+ 
+ SSHOBJS= ssh.o readconf.o clientloop.o sshtty.o \
+ 	sshconnect.o sshconnect1.o sshconnect2.o mux.o \
+-	roaming_common.o roaming_client.o
++	roaming_common.o roaming_client.o fips.o
+ 
+ SSHDOBJS=sshd.o auth-rhosts.o auth-passwd.o auth-rsa.o auth-rh-rsa.o \
+ 	audit.o audit-bsm.o audit-linux.o platform.o \
+@@ -92,7 +93,7 @@
+ 	sftp-server.o sftp-common.o \
+ 	roaming_common.o roaming_serv.o \
+ 	sandbox.o sandbox-null.o sandbox-rlimit.o sandbox-systrace.o \
+-	sandbox-darwin.o sandbox-seccomp-filter.o
++	sandbox-darwin.o sandbox-seccomp-filter.o fips.o
+ 
+ MANPAGES	= moduli.5.out scp.1.out ssh-add.1.out ssh-agent.1.out ssh-keygen.1.out ssh-keyscan.1.out ssh.1.out sshd.8.out sftp-server.8.out sftp.1.out ssh-keysign.8.out ssh-pkcs11-helper.8.out sshd_config.5.out ssh_config.5.out
+ MANPAGES_IN	= moduli.5 scp.1 ssh-add.1 ssh-agent.1 ssh-keygen.1 ssh-keyscan.1 ssh.1 sshd.8 sftp-server.8 sftp.1 ssh-keysign.8 ssh-pkcs11-helper.8 sshd_config.5 ssh_config.5
+@@ -127,6 +128,9 @@
+ $(SSHOBJS): Makefile.in config.h
+ $(SSHDOBJS): Makefile.in config.h
+ 
++fips.o: fips.c
++	$(CC) $(CFLAGS) $(CPPFLAGS) $(FIPS_CPPFLAGS) -c $<
++
+ .c.o:
+ 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $<
+ 
+--- a/configure.ac
++++ b/configure.ac
+@@ -2128,17 +2128,18 @@
+ #					LDFLAGS="-L${withval} -Wl,-R${withval} ${LDFLAGS}"
+ #				fi
+ #			fi
+-#			if test -d "$withval/include"; then
+-#				CPPFLAGS="-DOPENSSL_FIPS_CAPABLE -I${withval}/include ${CPPFLAGS}"
+-#			else
+-#				CPPFLAGS="-DOPENSSL_FIPS_CAPABLE -I${withval} ${CPPFLAGS}"
+-#			fi
++			if test -d "$withval/include"; then
++				FIPS_CPPFLAGS="-I${withval}/include"
++			else
++				FIPS_CPPFLAGS="-I${withval}"
++			fi
+ 			if test -d "$withval"; then
+ 				CPPFLAGS="-DOPENSSL_FIPS_CAPABLE ${CPPFLAGS}"
+ 				AC_DEFINE(OPENSSL_FIPS_CAPABLE, 1, [FIPS capable] )
+ 				fips="yes"
+ 			fi
+ 		fi
++		AC_SUBST(FIPS_CPPFLAGS)
+ 		openssl_check_nonfatal=1
+ 	]
+ )
+--- a/configure
++++ b/configure
+@@ -641,6 +641,7 @@
+ COMMENT_OUT_ECC
+ TEST_SSH_ECC
+ TEST_SSH_SHA256
++FIPS_CPPFLAGS
+ LIBEDIT
+ PKGCONFIG
+ LD
+@@ -10859,11 +10860,11 @@
+ #					LDFLAGS="-L${withval} -Wl,-R${withval} ${LDFLAGS}"
+ #				fi
+ #			fi
+-#			if test -d "$withval/include"; then
+-#				CPPFLAGS="-DOPENSSL_FIPS_CAPABLE -I${withval}/include ${CPPFLAGS}"
+-#			else
+-#				CPPFLAGS="-DOPENSSL_FIPS_CAPABLE -I${withval} ${CPPFLAGS}"
+-#			fi
++			if test -d "$withval/include"; then
++				FIPS_CPPFLAGS="-I${withval}/include"
++			else
++				FIPS_CPPFLAGS="-I${withval}"
++			fi
+ 			if test -d "$withval"; then
+ 				CPPFLAGS="-DOPENSSL_FIPS_CAPABLE ${CPPFLAGS}"
+ 
+@@ -10872,6 +10873,7 @@
+ 				fips="yes"
+ 			fi
+ 		fi
++
+ 		openssl_check_nonfatal=1
+ 
+ 

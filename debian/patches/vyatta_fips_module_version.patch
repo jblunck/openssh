@@ -1,0 +1,20 @@
+Subject: Vyatta FIPS OpenSSH Crypto Module Version (VRVDR-3249)
+
+The Vyatta OpenSSH crypto module version differs from the product version
+number. Therefore the OpenSSH crypto module can be part of multiple different
+releases of a Vyatta product. The version number needs to change if anything
+relevant to the FIPS module is changed.
+
+
+Index: openssh/sshd.c
+===================================================================
+--- openssh.orig/sshd.c
++++ openssh/sshd.c
+@@ -1822,6 +1822,7 @@ main(int ac, char **av)
+ #ifdef OPENSSL_FIPS_CAPABLE
+ 	if (FIPS_mode() && fips_check_power_on_selftest()) {
+ 		fips_post_print(SYSLOG_LEVEL_INFO);
++		logit("FIPS OpenSSH crypto module 6.0p1");
+ 		logit("FIPS mode initialized");
+ 	}
+ #endif /* OPENSSL_FIPS_CAPABLE */

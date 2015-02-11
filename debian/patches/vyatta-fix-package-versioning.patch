@@ -1,0 +1,8 @@
+--- a/version.h
++++ b/version.h
+@@ -8,4 +8,5 @@
+ #define SSH_RELEASE	SSH_RELEASE_MINIMUM " " SSH_EXTRAVERSION
+ #else
+ #define SSH_RELEASE	SSH_RELEASE_MINIMUM
++#define SSH_EXTRAVERSION ""
+ #endif

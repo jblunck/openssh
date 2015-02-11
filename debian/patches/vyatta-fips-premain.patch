@@ -1,0 +1,837 @@
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -68,7 +68,7 @@
+ 	compat.o compress.o crc32.o deattack.o fatal.o hostfile.o \
+ 	log.o match.o md-sha256.o moduli.o nchan.o packet.o \
+ 	readpass.o rsa.o ttymodes.o xmalloc.o addrmatch.o \
+-	atomicio.o key.o dispatch.o kex.o mac.o uidswap.o uuencode.o misc.o \
++	atomicio.o key.o dispatch.o mac.o uidswap.o uuencode.o misc.o \
+ 	monitor_fdpass.o rijndael.o ssh-dss.o ssh-ecdsa.o ssh-rsa.o dh.o \
+ 	kexdh.o kexgex.o kexdhc.o kexgexc.o bufec.o kexecdh.o kexecdhc.o \
+ 	kexgssc.o \
+@@ -77,7 +77,7 @@
+ 
+ SSHOBJS= ssh.o readconf.o clientloop.o sshtty.o \
+ 	sshconnect.o sshconnect1.o sshconnect2.o mux.o \
+-	roaming_common.o roaming_client.o fips.o
++	roaming_common.o roaming_client.o fips.o fips_post.o
+ 
+ SSHDOBJS=sshd.o auth-rhosts.o auth-passwd.o auth-rsa.o auth-rh-rsa.o \
+ 	audit.o audit-bsm.o audit-linux.o platform.o \
+@@ -93,7 +93,7 @@
+ 	sftp-server.o sftp-common.o \
+ 	roaming_common.o roaming_serv.o \
+ 	sandbox.o sandbox-null.o sandbox-rlimit.o sandbox-systrace.o \
+-	sandbox-darwin.o sandbox-seccomp-filter.o fips.o
++	sandbox-darwin.o sandbox-seccomp-filter.o fips.o fips_post.o
+ 
+ MANPAGES	= moduli.5.out scp.1.out ssh-add.1.out ssh-agent.1.out ssh-keygen.1.out ssh-keyscan.1.out ssh.1.out sshd.8.out sftp-server.8.out sftp.1.out ssh-keysign.8.out ssh-pkcs11-helper.8.out sshd_config.5.out ssh_config.5.out
+ MANPAGES_IN	= moduli.5 scp.1 ssh-add.1 ssh-agent.1 ssh-keygen.1 ssh-keyscan.1 ssh.1 sshd.8 sftp-server.8 sftp.1 ssh-keysign.8 ssh-pkcs11-helper.8 sshd_config.5 ssh_config.5
+@@ -131,6 +131,18 @@
+ fips.o: fips.c
+ 	$(CC) $(CFLAGS) $(CPPFLAGS) $(FIPS_CPPFLAGS) -c $<
+ 
++fips_start.o: fips_start.c
++	$(CC) $(CFLAGS) -DFIPS_START -c -o $@ $<
++
++fips_end.o: fips_start.c
++	$(CC) $(CFLAGS) -DFIPS_END -c -o $@ $<
++
++fips_post.o: fips_start.o fips_incore_fingerprint.o fips_premain.o kex.o fips_end.o
++	$(LD) -nostartfiles -nodefaultlibs -Wl,-Map=$@.map -Wl,-r -o $@ $(filter %.o, $^)
++
++fips_store_fingerprint$(EXEEXT): fips_store_fingerprint.c
++	$(CC) $(CFLAGS) $(CPPFLAGS) -DSYMBOL_NAME=FIPS_signature -o $@ $< -lelf
++
+ .c.o:
+ 	$(CC) $(CFLAGS) $(CPPFLAGS) -c $<
+ 
+@@ -145,9 +157,11 @@
+ 
+ ssh$(EXEEXT): $(LIBCOMPAT) libssh.a $(SSHOBJS)
+ 	$(LD) -o $@ $(SSHOBJS) $(LDFLAGS) -lssh -lopenbsd-compat $(SSHLIBS) $(LIBS)
++	./fips_store_fingerprint$(EXEEXT) $@ $$(bash $(srcdir)/fips_binary_fingerprint $@)
+ 
+-sshd$(EXEEXT): libssh.a	$(LIBCOMPAT) $(SSHDOBJS)
++sshd$(EXEEXT): libssh.a	$(LIBCOMPAT) $(SSHDOBJS) fips_store_fingerprint$(EXEEXT)
+ 	$(LD) -o $@ $(SSHDOBJS) $(LDFLAGS) -lssh -lopenbsd-compat $(SSHDLIBS) $(LIBS)
++	./fips_store_fingerprint$(EXEEXT) $@ $$(bash $(srcdir)/fips_binary_fingerprint $@)
+ 
+ scp$(EXEEXT): $(LIBCOMPAT) libssh.a scp.o progressmeter.o
+ 	$(LD) -o $@ scp.o progressmeter.o bufaux.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS)
+@@ -161,14 +175,16 @@
+ ssh-keygen$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-keygen.o
+ 	$(LD) -o $@ ssh-keygen.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS)
+ 
+-ssh-keysign$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-keysign.o roaming_dummy.o readconf.o
+-	$(LD) -o $@ ssh-keysign.o readconf.o roaming_dummy.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS)
++ssh-keysign$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-keysign.o roaming_dummy.o readconf.o fips_post.o
++	$(LD) -o $@ ssh-keysign.o readconf.o roaming_dummy.o fips_post.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS)
++	./fips_store_fingerprint$(EXEEXT) $@ $$(bash $(srcdir)/fips_binary_fingerprint $@)
+ 
+ ssh-pkcs11-helper$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-pkcs11-helper.o ssh-pkcs11.o
+ 	$(LD) -o $@ ssh-pkcs11-helper.o ssh-pkcs11.o $(LDFLAGS) -lssh -lopenbsd-compat -lssh -lopenbsd-compat $(LIBS)
+ 
+-ssh-keyscan$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-keyscan.o roaming_dummy.o
+-	$(LD) -o $@ ssh-keyscan.o roaming_dummy.o $(LDFLAGS) -lssh -lopenbsd-compat -lssh $(LIBS)
++ssh-keyscan$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-keyscan.o roaming_dummy.o fips_post.o
++	$(LD) -o $@ ssh-keyscan.o roaming_dummy.o fips_post.o $(LDFLAGS) -lssh -lopenbsd-compat -lssh $(LIBS)
++	./fips_store_fingerprint$(EXEEXT) $@ $$(bash $(srcdir)/fips_binary_fingerprint $@)
+ 
+ sftp-server$(EXEEXT): $(LIBCOMPAT) libssh.a sftp.o sftp-common.o sftp-server.o sftp-server-main.o
+ 	$(LD) -o $@ sftp-server.o sftp-common.o sftp-server-main.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS)
+--- /dev/null
++++ b/fips_binary_fingerprint
+@@ -0,0 +1,70 @@
++#!/bin/bash -e
++#
++# This script generates the HMAC-SHA-1 fingerprint for use with the FIPS incore
++# fingerprint implementation for the POST integrity test required by FIPS 140-2.
++# It uses the OpenSSL HMAC-SHA-1 implementation.
++#
++
++if [ -z "${BASH_VERSION}" ] ; then
++    echo "Requires bash"
++    exit 1
++fi
++
++function error ()
++{
++    echo $* >&2
++    exit 1
++}
++
++function get_symbol_offset ()
++{
++    local FILE=$1
++    local SYMBOL=$2
++
++    # get the symbol address with the help of nm because we only want
++    # defined symbols but don't want to filter on our own
++    SYMBOL=( $(nm --defined-only ${FILE} | grep " ${SYMBOL}" | \
++	awk '{ print $1 " " $3}') )
++
++    [ -z "${SYMBOL}" ] && error "Symbol not found: ${2}"
++
++    local SECTION_NAME=$(objdump -t ${FILE} | \
++	grep -E "${SYMBOL[0]}.*${SYMBOL[1]}" | \
++	awk '{ print $4 }')
++
++    # we get the .rodata VMA and the offset in the file from section headers
++    local TEXT=( $(objdump -h --section=${SECTION_NAME} ${FILE} | \
++	grep " ${SECTION_NAME}" | \
++	awk '{ print "0x" $4 " 0x" $6}') )
++
++    echo $(( 0x${SYMBOL[0]} - ${TEXT[0]} + ${TEXT[1]} ))
++}
++
++if [ $# -ne 1 ] ; then
++    echo "usage: $(basename ${0}) image"
++    exit 1
++fi
++
++FILE=${1}
++
++TEXT_START=$(get_symbol_offset ${FILE} FIPS_text_start) || exit 1
++TEXT_END=$(get_symbol_offset ${FILE} FIPS_text_end)
++RODATA_START=$(get_symbol_offset ${FILE} FIPS_rodata_start)
++RODATA_END=$(get_symbol_offset ${FILE} FIPS_rodata_end)
++SIGN_START=$(get_symbol_offset ${FILE} FIPS_signature)
++SIGN_END=$((${SIGN_START} + 20))
++
++DD="dd if=${FILE} bs=1 oflag=append conv=notrunc"
++(
++    ${DD} skip=${TEXT_START} count=$((${TEXT_END}-${TEXT_START})) 2>/dev/null
++
++    if [ ${SIGN_START} -gt ${RODATA_START} -a ${SIGN_END} -lt ${RODATA_END} ]
++    then
++	${DD} skip=${RODATA_START} count=$((${SIGN_START}-${RODATA_START})) \
++	    2>/dev/null
++	${DD} skip=${SIGN_END} count=$((${RODATA_END}-${SIGN_END})) 2>/dev/null
++    else
++	${DD} skip=${RODATA_START} count=$((${RODATA_END}-${RODATA_START})) \
++	    2>/dev/null
++    fi
++) | openssl dgst -sha1 -hmac "etaonrishdlcupfm" | sed -e 's/.*\ //'
+--- /dev/null
++++ b/fips_incore_fingerprint.c
+@@ -0,0 +1,127 @@
++#include <openssl/hmac.h>
++#include <string.h>
++
++#define FIPS_INCORE_FINGERPRINT_DEBUG 0
++
++/* copy definition from openssl/fips.h */
++#define FIPS_TEST_INTEGRITY 1
++
++extern const void *FIPS_text_start(),  *FIPS_text_end();
++extern const unsigned char FIPS_rodata_start[], FIPS_rodata_end[];
++
++/* reserve space for this binaries signature in rodata section */
++const unsigned char FIPS_signature [20] = { 0 };
++static const char FIPS_hmac_key[]="etaonrishdlcupfm";
++
++static void print_hex(const unsigned char *p1, const unsigned char *p2)
++{
++  int i, j;
++  const unsigned char *buf;
++  size_t buf_len;
++
++  if (p1 > p2) {
++    buf = p2;
++    p2 = p1;
++    p1 = buf;
++  }
++
++  buf = p1;
++  buf_len = (size_t)p2 - (size_t)p1;
++
++  for (i=0;i<buf_len;i+=16) {
++    fprintf(stderr, "%07x:", i);
++    for(j=0; j<16;j+=2)
++      fprintf(stderr, " %02x%02x",buf[i+j+0], buf[i+j+1]);
++    fprintf(stderr, "\n");
++  }
++
++  fprintf(stderr, "\n");
++  fflush(stderr);
++}
++
++unsigned int FIPS_incore_fingerprint(unsigned char *sig,unsigned int len)
++{
++	const unsigned char *p1 = FIPS_text_start();
++	const unsigned char *p2 = FIPS_text_end();
++	const unsigned char *p3 = FIPS_rodata_start;
++	const unsigned char *p4 = FIPS_rodata_end;
++	HMAC_CTX c;
++
++	HMAC_CTX_init(&c);
++	HMAC_Init(&c,FIPS_hmac_key,strlen(FIPS_hmac_key),EVP_sha1());
++
++	/* detect overlapping regions */
++	if (p1<=p3 && p2>=p3)
++		p3=p1, p4=p2>p4?p2:p4, p1=NULL, p2=NULL;
++	else if (p3<=p1 && p4>=p1)
++		p3=p3, p4=p2>p4?p2:p4, p1=NULL, p2=NULL;
++
++	if (p1)
++		HMAC_Update(&c,p1,(size_t)p2-(size_t)p1);
++
++	if (FIPS_signature>=p3 && FIPS_signature<p4)
++	{
++		/* "punch" hole */
++		HMAC_Update(&c,p3,(size_t)FIPS_signature-(size_t)p3);
++		p3 = FIPS_signature+sizeof(FIPS_signature);
++		if (p3<p4)
++			HMAC_Update(&c,p3,(size_t)p4-(size_t)p3);
++	}
++	else
++		HMAC_Update(&c,p3,(size_t)p4-(size_t)p3);
++
++	HMAC_Final(&c,sig,&len);
++	HMAC_CTX_cleanup(&c);
++
++#if FIPS_INCORE_FINGERPRINT_DEBUG
++	print_hex(FIPS_text_start(), FIPS_text_end());
++	print_hex(FIPS_rodata_start, FIPS_rodata_end);
++
++	do {
++		int i;
++
++		for (i=0;i<len;i++)
++			printf("%02x",sig[i]);
++		printf("\n");
++		fflush(stdout);
++	} while(0);
++#endif
++
++	return len;
++}
++
++int FIPS_check_incore_fingerprint(void)
++{
++	unsigned char sig[EVP_MAX_MD_SIZE];
++	unsigned int len;
++
++	if (FIPS_text_start()==NULL)
++	{
++		/*
++		fprintf(stderr,"%s: FIPS_text_start() returns NULL\n",
++			__FUNCTION__);
++		*/
++		return 0;
++	}
++
++	len=FIPS_incore_fingerprint(sig,sizeof(sig));
++
++	if (len!=sizeof(FIPS_signature))
++	{
++		/*
++		fprintf(stderr,"%s: fingerprint length mismatch: %u\n",
++			__FUNCTION__, len);
++		*/
++		return 0;
++	}
++
++	if (memcmp(FIPS_signature,sig,sizeof(FIPS_signature)))
++	{
++		/*
++		fprintf(stderr,"%s: FIPS_signature mismatch\n", __FUNCTION__);
++		*/
++		return 0;
++	}
++
++	return 1;
++}
+--- /dev/null
++++ b/fips_post.c
+@@ -0,0 +1,5 @@
++
++int __attribute__((weak)) fips_post_corrupt(int id, int subid, void *ex)
++{
++	return 1;
++}
+--- /dev/null
++++ b/fips_premain.c
+@@ -0,0 +1,266 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include <openssl/crypto.h>
++
++#include "buffer.h"
++#include "cipher.h"
++#include "key.h"
++#include "kex.h"
++#include "log.h"
++extern char *__progname;
++
++extern const void *FIPS_text_start(void);
++extern const void *FIPS_text_end(void);
++extern const unsigned char FIPS_rodata_start[], FIPS_rodata_end[];
++
++extern int FIPS_check_incore_fingerprint(void);
++
++
++extern const Newkeys *current_keys[MODE_MAX];
++
++/*
++ * SSH KDF KAT: the values are taken from our CAVP response file (COUNT = 23).
++ */
++static const unsigned char K[] = {
++	0xf5, 0xea, 0x19, 0xbd, 0xda, 0x6c, 0x10, 0xae,
++	0xe2, 0xa4, 0xe9, 0x42, 0x04, 0x10, 0x50, 0xb2,
++	0xf6, 0x42, 0x28, 0x91, 0x23, 0x79, 0x2d, 0x55,
++	0x62, 0xa0, 0x49, 0xb0, 0xf1, 0x4d, 0xc4, 0xdc,
++	0x51, 0x53, 0xff, 0xcc, 0x64, 0x23, 0x89, 0x59,
++	0x93, 0x0e, 0x5e, 0xcb, 0x82, 0x63, 0xa3, 0x18,
++	0x02, 0x62, 0x69, 0xb6, 0xf6, 0xd1, 0xaa, 0xd1,
++	0xe2, 0xfd, 0xfe, 0x87, 0xe1, 0x69, 0x40, 0x6a,
++	0x6f, 0x70, 0x5c, 0x56, 0xf2, 0xfc, 0x97, 0x43,
++	0xa4, 0xb7, 0xf4, 0x11, 0xdb, 0x94, 0xf7, 0xb5,
++	0xdf, 0xd5, 0xdb, 0x93, 0x4b, 0x64, 0xb7, 0xe1,
++	0x59, 0x61, 0x53, 0xf8, 0xc6, 0x42, 0xb2, 0xdf,
++	0x75, 0xb2, 0x1f, 0x48, 0x16, 0x38, 0x83, 0xb7,
++	0x7e, 0x3e, 0x77, 0xa8, 0xd3, 0xfc, 0xc2, 0x66,
++	0x34, 0x78, 0x53, 0x0b, 0x90, 0x36, 0x55, 0x68,
++	0x00, 0x89, 0x7e, 0xb0, 0xb7, 0x79, 0xc3, 0x16,
++	0x46, 0xbd, 0x58, 0x10, 0x87, 0x39, 0xbf, 0x76,
++	0x05, 0xfe, 0xaf, 0x24, 0x50, 0xfe, 0x17, 0xa5,
++	0x71, 0x10, 0xfb, 0x86, 0xb3, 0x70, 0x3a, 0x7d,
++	0x42, 0x26, 0x48, 0x2f, 0xca, 0x83, 0x01, 0x40,
++	0x52, 0x78, 0xe5, 0x4e, 0x7a, 0x54, 0x88, 0xe2,
++	0xa9, 0xe7, 0xc5, 0xb5, 0x63, 0x7e, 0xa3, 0x40,
++	0x20, 0x01, 0x0d, 0x7c, 0x8c, 0xf4, 0x1d, 0xf6,
++	0x9d, 0xb7, 0xb9, 0x0a, 0xa8, 0x17, 0xf8, 0xbf,
++	0xc3, 0xf3, 0x47, 0xc2, 0x66, 0xda, 0x3f, 0x55,
++	0x83, 0x49, 0x67, 0xe6, 0x7e, 0xe0, 0x1a, 0x82,
++	0x96, 0xcc, 0xf3, 0x98, 0xf5, 0xc5, 0x70, 0x92,
++	0xfd, 0xda, 0x35, 0xfc, 0xf2, 0x41, 0x4f, 0xa8,
++	0xe2, 0x0a, 0x7f, 0x27, 0x39, 0xab, 0x22, 0x2b,
++	0x86, 0xca, 0x41, 0xc8, 0x09, 0xb9, 0x98, 0x3e,
++	0x0a, 0x52, 0x8f, 0x7f, 0x6b, 0xf8, 0x11, 0xd7,
++	0xdd, 0xda, 0x14, 0x4c, 0xd2, 0x94, 0xa3, 0xd1,
++};
++
++static const char H[] = {
++	0x8c, 0xdc, 0xd8, 0x8f, 0x65, 0x9e, 0x2d, 0x1b,
++	0xad, 0xd0, 0xa0, 0x2b, 0x6d, 0x93, 0xf7, 0xf3,
++	0x08, 0xe9, 0x21, 0x15, 0xb7, 0x14, 0x0c, 0x8a,
++	0x27, 0xeb, 0x38, 0x22, 0x58, 0x8b, 0x85, 0xb7,
++};
++
++static const char session_id[] = {
++	0x52, 0xad, 0xce, 0xab, 0x85, 0xe9, 0x64, 0xd0,
++	0x38, 0xf5, 0xb4, 0x59, 0x04, 0xa3, 0xa6, 0x74,
++	0x88, 0xac, 0x9f, 0x7d, 0x6b, 0xbb, 0x3c, 0xb3,
++	0x38, 0xd3, 0xf2, 0xfc, 0x32, 0x7a, 0xfb, 0x05,
++};
++
++/* Initial IV (client to server) */
++static const unsigned char iv_c2s[] = {
++	0x54, 0xe9, 0xe3, 0x9b, 0xa4, 0x32, 0xef, 0x98,
++};
++/* Initial IV (server to client) */
++static const unsigned char iv_s2c[] = {
++	0xb8, 0x37, 0xf1, 0x91, 0xb2, 0x3f, 0x2a, 0xbb,
++};
++
++/* Encryption key (client to server) */
++static const unsigned char enc_key_c2s[] = {
++	0xa4, 0xdb, 0xc9, 0xe2, 0x44, 0xeb, 0x16, 0x9e,
++	0xfe, 0xb8, 0xb1, 0x8c, 0xd6, 0xda, 0x7e, 0x62,
++	0x1b, 0x1d, 0xc5, 0x00, 0xe1, 0x51, 0x36, 0xf3,
++};
++
++/* Encryption key (server to client) */
++static const unsigned char enc_key_s2c[] = {
++	0xd3, 0xee, 0xa0, 0xf4, 0x4d, 0xef, 0xc6, 0x3f,
++	0x16, 0xc8, 0x5a, 0x67, 0xf7, 0xd1, 0x9e, 0x5a,
++	0x0c, 0x57, 0x36, 0x76, 0x97, 0xb1, 0xd2, 0x58,
++};
++
++
++/* Integrity key (client to server) */
++static const unsigned char mac_key_c2s[] = {
++	0x86, 0xe1, 0xc3, 0x0f, 0x1b, 0x7b, 0x90, 0x8c,
++	0x7e, 0xe3, 0xce, 0x66, 0xb0, 0x77, 0x5d, 0x83,
++	0x82, 0xf0, 0x81, 0xb9, 0x80, 0x6e, 0xe1, 0xb1,
++	0x32, 0x4d, 0xc1, 0x93, 0xe2, 0xd4, 0x75, 0x65,
++};
++
++/* Integrity key (server to client) */
++static const unsigned char mac_key_s2c[] = {
++	0xe7, 0xaf, 0xea, 0xb7, 0xb0, 0xda, 0x93, 0x5b,
++	0x34, 0xd9, 0xe6, 0x36, 0xe7, 0x73, 0x98, 0x7e,
++	0x50, 0xa7, 0x62, 0xf6, 0x05, 0xb2, 0xfd, 0x79,
++	0x09, 0xd9, 0xbe, 0xf5, 0x5b, 0x9e, 0xd4, 0xef,
++};
++
++
++static int kex_derive_keys_kat()
++{
++	Kex kex;
++	BIGNUM* bn_k;
++	int ret;
++	Newkeys *keys[MODE_MAX];
++
++	kex.evp_md = EVP_sha256();
++	kex.session_id_len = sizeof(session_id);
++	kex.session_id = (char *)session_id;
++	kex.we_need = EVP_MD_size(kex.evp_md);
++	kex.server = 1;
++
++	kex.newkeys[MODE_IN] = OPENSSL_malloc(sizeof(*(current_keys[MODE_IN])));
++	kex.newkeys[MODE_OUT] = OPENSSL_malloc(sizeof(*(current_keys[MODE_OUT])));
++
++	bn_k = BN_bin2bn(K, sizeof(K), NULL);
++	if (!bn_k) {
++		error("BN_hex2bin failed\n");
++		return 0;
++	}
++
++	/* FIPS Operational Testing requires us to corrupt the POST */
++	do {
++		char *env = getenv("OPENSSL_FIPS_FAILTEST");
++
++		if (env && (strcmp(env, "SSH KDF") == 0))
++			BN_add_word(bn_k, 1);
++	} while(0);
++
++	kex_derive_keys(&kex, (u_char*)H, sizeof(H), bn_k);
++	BN_clear_free(bn_k);
++
++	ret = 1;
++	if (memcmp(iv_c2s, current_keys[MODE_IN]->enc.iv, sizeof(iv_c2s))) {
++		error("iv_c2s mismatch\n");
++		ret = 0;
++	}
++	if (memcmp(iv_s2c, current_keys[MODE_OUT]->enc.iv, sizeof(iv_s2c))) {
++		error("iv_s2c mismatch\n");
++		ret = 0;
++	}
++	if (memcmp(enc_key_c2s, current_keys[MODE_IN]->enc.key,
++			sizeof(enc_key_c2s))) {
++		error("enc_key_c2s mismatch\n");
++		ret = 0;
++	}
++	if (memcmp(enc_key_s2c, current_keys[MODE_OUT]->enc.key,
++			sizeof(enc_key_s2c))) {
++		error("enc_key_s2c mismatch\n");
++		ret = 0;
++	}
++	if (memcmp(mac_key_c2s, current_keys[MODE_IN]->mac.key,
++			sizeof(mac_key_c2s))) {
++		error("mac_key_c2s mismatch\n");
++		ret = 0;
++	}
++	if (memcmp(mac_key_s2c, current_keys[MODE_OUT]->mac.key,
++			sizeof(mac_key_s2c))) {
++		error("mac_key_s2c mismatch\n");
++		ret = 0;
++	}
++
++	keys[MODE_IN] = kex_get_newkeys(MODE_IN);
++	keys[MODE_OUT] = kex_get_newkeys(MODE_OUT);
++
++	OPENSSL_free(keys[MODE_IN]->enc.iv);
++	OPENSSL_free(keys[MODE_IN]->enc.key);
++	OPENSSL_free(keys[MODE_IN]->mac.key);
++	OPENSSL_free(keys[MODE_IN]);
++
++	OPENSSL_free(keys[MODE_OUT]->enc.iv);
++	OPENSSL_free(keys[MODE_OUT]->enc.key);
++	OPENSSL_free(keys[MODE_OUT]->mac.key);
++	OPENSSL_free(keys[MODE_OUT]);
++	return ret;
++}
++
++extern const unsigned char FIPS_signature[];
++
++/* This comes from out OpenSSL library */
++extern int FIPS_post_vprintf(const char *fmt, va_list args)
++	__attribute__((weak));
++
++static void post_printf(const char *fmt, ...)
++{
++	/* Force the output to syslog */
++	//log_init(__progname, SYSLOG_LEVEL_VERBOSE,
++	//	SYSLOG_FACILITY_AUTH, 0);
++
++	va_list args;
++	va_start(args, fmt);
++
++	if (FIPS_post_vprintf)
++		FIPS_post_vprintf(fmt, args);
++	else
++		do_log(SYSLOG_LEVEL_INFO, fmt, args);
++
++	va_end(args);
++}
++
++int fips_check_power_on_selftest()
++{
++	static int passed = -1;
++
++	if (!FIPS_mode())
++		return passed;
++
++	if (passed < 0) {
++		passed = 1;
++
++		post_printf("OpenSSH POST started\n");
++
++		post_printf("	Integrity test started\n");
++		if (!FIPS_check_incore_fingerprint()) {
++			post_printf("	Integrity test Failed!!\n");
++			passed = 0;
++		} else {
++			char asctmp[41];
++			int i;
++			for (i=0;i<20;++i)
++				sprintf(asctmp+(2*i), "%02x",
++					FIPS_signature[i]);
++			post_printf("	Integrity %s test OK\n", asctmp);
++		}
++
++		post_printf("	SSH KDF KAT test started\n");
++		if (!kex_derive_keys_kat()) {
++			post_printf("	SSH KDF KAT test Failed!!\n");
++			passed = 0;
++		} else
++			post_printf("	SSH KDF KAT test OK\n");
++
++		post_printf("OpenSSH POST %s\n", passed ? "Success" : "Failed");
++	}
++
++	if (passed != 1)
++		abort();
++
++	return passed;
++}
++
++
++/*
++ * This will end up in .text.startup and therefore is not covered by the
++ * fingerprint: do not implement the selftest itself here!
++ */
++void __attribute__ ((constructor)) fips_premain()
++{
++	(void)fips_check_power_on_selftest();
++}
+--- /dev/null
++++ b/fips_start.c
+@@ -0,0 +1,24 @@
++#ifdef FIPS_START
++const void *FIPS_text_start()
++{
++  const void *(*fpointer)() = &FIPS_text_start;
++  return fpointer;
++}
++
++/* we use a magic pattern that is easy to spot in xxd (on little-endians) */
++const unsigned int FIPS_rodata_start[] __attribute__((nocommon)) = {
++	0x53504946, 0x646f725f, 0x5f617461, 0x72617473
++};
++#endif
++#ifdef FIPS_END
++const void *FIPS_text_end()
++{
++  const void* (*fpointer)() = &FIPS_text_end;
++  return fpointer;
++}
++
++/* we use a magic pattern that is easy to spot in xxd (on little-endians) */
++const unsigned int FIPS_rodata_end[]  __attribute__((nocommon)) = {
++	0x53504946, 0x646f725f, 0x5f617461, 0x20646e65
++};
++#endif
+--- /dev/null
++++ b/fips_store_fingerprint.c
+@@ -0,0 +1,204 @@
++#include <gelf.h>
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <unistd.h>
++
++#define _STRINGIZE(x) #x
++#define STRINGIZE(x) _STRINGIZE(x)
++
++#ifndef SYMBOL_NAME
++#define SYMBOL_NAME "fips_sha1_fingerprint"
++#endif
++
++Elf_Scn *_elf_getscnbyname(Elf *__elf, const char *name);
++int _gelf_getsymbolbyname(Elf *__elf, Elf_Scn *scn, const char *name,
++			GElf_Sym *sym);
++long _elf_offsetbysymbol(Elf *__elf, const GElf_Sym *sym);
++
++void usage(const char *command);
++void parse_hex(const char *hex, size_t len, char *val);
++
++int main (int argc, char **argv) {
++	int fd;
++	Elf *e;
++	ssize_t ret;
++	size_t shstrndx;
++	Elf_Scn *symtab_scn;
++	GElf_Sym sym;
++	const char *symbol_name = STRINGIZE(SYMBOL_NAME);
++	size_t fingerprint_len = 0;
++	char *fingerprint;
++	long offset;
++
++	if ( argc != 3 ) {
++		usage(argv[0]);
++		exit(-1);
++	}
++
++	/* argv[2] is the fingerprint */
++	fingerprint_len = strlen(argv[2]) >> 1;
++	fingerprint = calloc(sizeof(char), fingerprint_len + 1);
++	if (strncasecmp(argv[2], "0x", 2) == 0) {
++		fingerprint_len -= 1;
++		parse_hex(argv[2] + 2, fingerprint_len, fingerprint);
++	} else
++		parse_hex(argv[2], fingerprint_len, fingerprint);
++
++	/* argv[1] is the filename */
++	fd = open(argv[1], O_RDWR, 0);
++	if (fd < 0) {
++		perror("open() failed");
++		exit(-1);
++	}
++
++	if (elf_version(EV_CURRENT) == EV_NONE) {
++		fprintf(stderr, "ELF library initialization failed: %s\n",
++			elf_errmsg(-1));
++		exit(-1);
++	}
++
++	if ((e = elf_begin(fd, ELF_C_READ, NULL)) == NULL) {
++		fprintf(stderr, "elf_begin() failed: %s\n", elf_errmsg(-1));
++		exit(-1);
++	}
++
++	if (elf_kind(e) != ELF_K_ELF) {
++		fprintf(stderr, "%s is not an ELF object\n", argv[1]);
++		exit(-1);
++	}
++
++	ret = elf_getshdrstrndx(e, &shstrndx);
++	if (ret) {
++		fprintf(stderr, "elf_getshdrstrndx() failed: %s\n",
++			elf_errmsg(ret));
++		exit(-1);
++	}
++
++	symtab_scn = _elf_getscnbyname(e, ".symtab");
++	if (symtab_scn == NULL) {
++		fprintf(stderr,
++			"_elf_getscnbyname() failed: no such section\n");
++		exit(-1);
++	}
++
++	ret = _gelf_getsymbolbyname(e, symtab_scn, symbol_name, &sym);
++	if (ret) {
++		fprintf(stderr,
++			"_gelf_getsymbolbyname() failed: no such symbol\n");
++		exit (-1);
++	}
++
++	if (sym.st_size != fingerprint_len) {
++		fprintf(stderr,
++			"symbol size doesn't match fingerprint length: "
++			"%ld != %ld\n", (long)sym.st_size,
++			(long)fingerprint_len);
++		exit (-1);
++	}
++
++	offset =  _elf_offsetbysymbol(e, &sym);
++
++	ret = lseek(fd, offset, SEEK_SET);
++	if (ret == -1) {
++		perror("lseek() failed");
++		exit(-1);
++	}
++
++	ret = write(fd, fingerprint, fingerprint_len);
++	if (ret < (ssize_t)fingerprint_len)  {
++		perror("write() failed");
++		exit(-1);
++	}
++
++	close(fd);
++	return 0;
++}
++
++void usage(const char *command)
++{
++	printf("Usage: %s vmlinux fingerprint\n", command);
++	return;
++}
++
++void parse_hex(const char *hex, size_t len, char *val)
++{
++	const char *pos = hex;
++	size_t count;
++
++	for (count = 0; count < len; ++count) {
++		char buf[3] = {pos[0], pos[1], 0};
++		val[count] = strtol(buf, NULL, 16);
++		pos += 2 * sizeof(char);
++	}
++}
++
++Elf_Scn *_elf_getscnbyname(Elf *__elf, const char *name)
++{
++	int ret;
++	size_t shstrndx;
++	Elf_Scn *scn = NULL;
++
++	ret = elf_getshdrstrndx(__elf, &shstrndx);
++	if (ret)
++		return NULL;
++
++	while ((scn = elf_nextscn(__elf, scn)) != NULL) {
++		GElf_Shdr shdr;
++		if (gelf_getshdr(scn, &shdr) == NULL)
++			continue;
++		if (strncmp(elf_strptr(__elf, shstrndx, shdr.sh_name), name,
++				strlen(name)) == 0)
++			return scn;
++	}
++
++	return NULL;
++}
++
++int _gelf_getsymbolbyname(Elf *__elf, Elf_Scn *scn, const char *name,
++			GElf_Sym *sym)
++{
++	Elf_Data *data = elf_getdata(scn, NULL);
++	GElf_Shdr shdr;
++	size_t count, i;
++
++	if (gelf_getshdr(scn, &shdr) == NULL) {
++		fprintf(stderr, "gelf_getshdr() failed: \n");
++		return -1;
++	}
++
++	count = shdr.sh_size / shdr.sh_entsize;
++
++	for (i=0 ; i<count ; ++i) {
++		const char* sym_name;
++
++		gelf_getsym(data, i, sym);
++		sym_name = elf_strptr(__elf, shdr.sh_link, sym->st_name);
++		if (strncmp(sym_name, name, strlen(name)) == 0)
++			return 0;
++	}
++
++	return -1;
++}
++
++long _elf_offsetbysymbol(Elf *__elf, const GElf_Sym *sym)
++{
++	GElf_Shdr shdr;
++	Elf_Scn *scn = elf_getscn(__elf, sym->st_shndx);
++	if (scn == NULL) {
++		fprintf(stderr,
++			"elf_getscn() failed: no such section\n");
++		return -1;
++	}
++
++	if (gelf_getshdr(scn, &shdr) == NULL) {
++		fprintf(stderr, "gelf_getshdr() failed: \n");
++		return -1;
++	}
++
++	return sym->st_value - shdr.sh_addr + shdr.sh_offset;
++}
+--- a/sshd.c
++++ b/sshd.c
+@@ -147,6 +147,7 @@
+ #ifdef OPENSSL_FIPS_CAPABLE
+ extern void register_fips_post_callback();
+ extern void fips_post_print(LogLevel level);
++extern int fips_check_power_on_selftest();
+ #endif
+ 
+ extern char *__progname;
+@@ -1819,7 +1820,7 @@
+ 	arc4random_stir();
+ 
+ #ifdef OPENSSL_FIPS_CAPABLE
+-	if (FIPS_mode()) {
++	if (FIPS_mode() && fips_check_power_on_selftest()) {
+ 		fips_post_print(SYSLOG_LEVEL_INFO);
+ 		logit("FIPS mode initialized");
+ 	}
+--- a/contrib/cavp/Makefile
++++ b/contrib/cavp/Makefile
+@@ -17,6 +17,9 @@
+ $(BUILD_DIR)/libssh.a:
+ 	$(MAKE) -C $(BUILD_DIR) libssh.a
+ 
++$(BUILD_DIR)/fips_post.o:
++	$(MAKE) -C $(BUILD_DIR) fips_post.o
++
+ ifneq (,$(LIBCOMPAT))
+ DOTDOT_LIBCOMPAT=$(BUILD_DIR)/$(LIBCOMPAT)
+ 
+@@ -25,5 +28,7 @@
+ endif
+ 
+ # CAVS test for FIPS - not build by default
+-fips_askdfvs: $(DOTDOT_LIBCOMPAT) $(BUILD_DIR)/libssh.a fips_askdfvs.o
+-	( cd $(BUILD_DIR) && $(LD) -o $(top_srcdir)/contrib/cavp/$@ $(top_srcdir)/contrib/cavp/fips_askdfvs.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS) entropy.o -lcrypto -lssl ) ;
++fips_askdfvs: $(DOTDOT_LIBCOMPAT) $(BUILD_DIR)/libssh.a $(BUILD_DIR)/fips_post.o fips_askdfvs.o
++	( cd $(BUILD_DIR) ; \
++	$(LD) -o $(top_srcdir)/contrib/cavp/$@ $(top_srcdir)/contrib/cavp/fips_askdfvs.o fips_post.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS) entropy.o -lcrypto -lssl ; \
++	./fips_store_fingerprint$(EXEEXT) $(top_srcdir)/contrib/cavp/$@ $$(bash $(srcdir)/fips_binary_fingerprint $(top_srcdir)/contrib/cavp/$@) ) ;

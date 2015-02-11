@@ -1,0 +1,371 @@
+Index: openssh/Makefile.in
+===================================================================
+--- openssh.orig/Makefile.in	2015-01-02 10:13:36.140099479 -0800
++++ openssh/Makefile.in	2015-01-02 10:13:36.176099617 -0800
+@@ -60,7 +60,7 @@
+ EXEEXT=@EXEEXT@
+ MANFMT=@MANFMT@
+ 
+-TARGETS=ssh$(EXEEXT) sshd$(EXEEXT) ssh-add$(EXEEXT) ssh-keygen$(EXEEXT) ssh-keyscan${EXEEXT} ssh-keysign${EXEEXT} ssh-pkcs11-helper$(EXEEXT) ssh-agent$(EXEEXT) scp$(EXEEXT) sftp-server$(EXEEXT) sftp$(EXEEXT)
++TARGETS=ssh$(EXEEXT) sshd$(EXEEXT) ssh-add$(EXEEXT) ssh-keygen$(EXEEXT) ssh-keyscan${EXEEXT} ssh-keysign${EXEEXT} ssh-pkcs11-helper$(EXEEXT) ssh-agent$(EXEEXT) scp$(EXEEXT) sftp-server$(EXEEXT) sftp$(EXEEXT) ssh-keycheck$(EXEEXT)
+ 
+ LIBSSH_OBJS=acss.o authfd.o authfile.o bufaux.o bufbn.o buffer.o \
+ 	canohost.o channels.o cipher.o cipher-acss.o cipher-aes.o \
+@@ -95,6 +95,8 @@
+ 	sandbox.o sandbox-null.o sandbox-rlimit.o sandbox-systrace.o \
+ 	sandbox-darwin.o sandbox-seccomp-filter.o fips.o fips_post.o
+ 
++KEYCHECKOBJS=servconf.o roaming_common.o roaming_serv.o fips.o fips_post.o groupaccess.o
++
+ MANPAGES	= moduli.5.out scp.1.out ssh-add.1.out ssh-agent.1.out ssh-keygen.1.out ssh-keyscan.1.out ssh.1.out sshd.8.out sftp-server.8.out sftp.1.out ssh-keysign.8.out ssh-pkcs11-helper.8.out sshd_config.5.out ssh_config.5.out
+ MANPAGES_IN	= moduli.5 scp.1 ssh-add.1 ssh-agent.1 ssh-keygen.1 ssh-keyscan.1 ssh.1 sshd.8 sftp-server.8 sftp.1 ssh-keysign.8 ssh-pkcs11-helper.8 sshd_config.5 ssh_config.5
+ MANTYPE		= @MANTYPE@
+@@ -172,6 +174,11 @@
+ ssh-agent$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-agent.o ssh-pkcs11-client.o
+ 	$(LD) -o $@ ssh-agent.o ssh-pkcs11-client.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS)
+ 
++ssh-keycheck$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-keycheck.o servconf.o
++	$(LD) -o $@ $(KEYCHECKOBJS) ssh-keycheck.o $(LDFLAGS) -lssh -lopenbsd-compat $(SSHDLIBS) $(LIBS)
++	./fips_store_fingerprint$(EXEEXT) $@ $$(bash $(srcdir)/fips_binary_fingerprint $@)
++
++
+ ssh-keygen$(EXEEXT): $(LIBCOMPAT) libssh.a ssh-keygen.o
+ 	$(LD) -o $@ ssh-keygen.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS)
+ 
+@@ -275,6 +282,7 @@
+ 	$(INSTALL) -m 0755 $(STRIP_OPT) ssh-agent$(EXEEXT) $(DESTDIR)$(bindir)/ssh-agent$(EXEEXT)
+ 	$(INSTALL) -m 0755 $(STRIP_OPT) ssh-keygen$(EXEEXT) $(DESTDIR)$(bindir)/ssh-keygen$(EXEEXT)
+ 	$(INSTALL) -m 0755 $(STRIP_OPT) ssh-keyscan$(EXEEXT) $(DESTDIR)$(bindir)/ssh-keyscan$(EXEEXT)
++	$(INSTALL) -m 0755 $(STRIP_OPT) ssh-keycheck$(EXEEXT) $(DESTDIR)$(bindir)/ssh-keycheck$(EXEEXT)
+ 	$(INSTALL) -m 0755 $(STRIP_OPT) sshd$(EXEEXT) $(DESTDIR)$(sbindir)/sshd$(EXEEXT)
+ 	$(INSTALL) -m 4711 $(STRIP_OPT) ssh-keysign$(EXEEXT) $(DESTDIR)$(SSH_KEYSIGN)$(EXEEXT)
+ 	$(INSTALL) -m 0755 $(STRIP_OPT) ssh-pkcs11-helper$(EXEEXT) $(DESTDIR)$(SSH_PKCS11_HELPER)$(EXEEXT)
+@@ -376,6 +384,7 @@
+ 	-rm -f $(DESTDIR)$(bindir)/ssh-agent$(EXEEXT)
+ 	-rm -f $(DESTDIR)$(bindir)/ssh-keygen$(EXEEXT)
+ 	-rm -f $(DESTDIR)$(bindir)/ssh-keyscan$(EXEEXT)
++	-rm -f $(DESTDIR)$(bindir)/ssh-keycheck$(EXEEXT)
+ 	-rm -f $(DESTDIR)$(bindir)/sftp$(EXEEXT)
+ 	-rm -f $(DESTDIR)$(sbindir)/sshd$(EXEEXT)
+ 	-rm -r $(DESTDIR)$(SFTP_SERVER)$(EXEEXT)
+Index: openssh/ssh-keycheck.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ openssh/ssh-keycheck.c	2015-01-02 10:16:31.160772562 -0800
+@@ -0,0 +1,224 @@
++#include "includes.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <netdb.h>
++#ifdef HAVE_PATHS_H
++# include <paths.h>
++#endif
++#include <pwd.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "xmalloc.h"
++#include "ssh.h"
++#include "key.h"
++#include "rsa.h"
++#include "authfile.h"
++#include "uuencode.h"
++#include "buffer.h"
++#include "log.h"
++#include "servconf.h"
++#include "pathnames.h"
++#include "misc.h"
++#include "match.h"
++#include "hostfile.h"
++#include "dns.h"
++#include "ssh2.h"
++#include "ssh-pkcs11.h"
++
++#include <openssl/evp.h>
++#include <openssl/err.h>
++#include <openssl/ecdsa.h>
++#include <openssl/sha.h>
++
++#define DATALEN 32
++
++int use_privsep = -1;
++
++/* Server configuration options. */
++ServerOptions options;
++
++/* Name of the server configuration file. */
++char *config_file_name = _PATH_SERVER_CONFIG_FILE;
++
++Buffer cfg;
++
++typedef struct {
++	Key	*server_key;		/* ephemeral server key */
++	Key	*ssh1_host_key;		/* ssh1 host key */
++	Key	**host_keys;		/* all private host keys */
++	int	have_ssh1_key;
++	int	have_ssh2_key;
++	u_char	ssh1_cookie[SSH_SESSION_KEY_LENGTH];
++} keydata_t;
++keydata_t privkeys, pubkeys;
++
++/* Destroy the host and server keys.  They will no longer be needed. */
++void
++destroy_key_data(keydata_t *kd)
++{
++	int i;
++
++	if (kd->server_key) {
++		key_free(kd->server_key);
++		kd->server_key = NULL;
++	}
++	for (i = 0; i < options.num_host_key_files; i++) {
++		if (kd->host_keys[i]) {
++			key_free(kd->host_keys[i]);
++			kd->host_keys[i] = NULL;
++		}
++	}
++	kd->ssh1_host_key = NULL;
++	memset(kd->ssh1_cookie, 0, SSH_SESSION_KEY_LENGTH);
++}
++
++int main(int argc, char **argv, char **env)
++{
++	int i;
++	Key *key;
++	char *filename_pubkey;
++	int failure = 0;
++
++	log_init(argv[0], SYSLOG_LEVEL_INFO, 0, 1);
++
++	/* Initialize configuration options to their default values. */
++	initialize_server_options(&options);
++	load_server_config(config_file_name, &cfg);
++	parse_server_config(&options, config_file_name, &cfg, NULL, NULL, NULL);
++	/* Fill in default values for those options not explicitly set. */
++	fill_default_server_options(&options);
++
++#ifdef OPENSSL_FIPS_CAPABLE
++	if (options.fips_mode || getenv("OPENSSL_FIPS")) {
++	  if (!FIPS_mode_set(1)) {
++	    ERR_load_crypto_strings();
++	    ERR_print_errors_fp(stdout);
++	    printf("FIPS_mode_set(): failed to enter FIPS mode!\n");
++	    exit(1);
++	  }
++	}
++#endif
++
++	/* Load private keys */
++	privkeys.server_key = NULL;
++	privkeys.ssh1_host_key = NULL;
++	privkeys.have_ssh1_key = 0;
++	privkeys.have_ssh2_key = 0;
++	privkeys.host_keys = xcalloc(options.num_host_key_files,
++	    sizeof(Key *));
++	for (i = 0; i < options.num_host_key_files; i++)
++		privkeys.host_keys[i] = NULL;
++
++	for (i = 0; i < options.num_host_key_files; i++) {
++		key = key_load_private(options.host_key_files[i], "", NULL);
++		privkeys.host_keys[i] = key;
++		if (key == NULL) {
++			error("Could not load host key: %s",
++			    options.host_key_files[i]);
++			privkeys.host_keys[i] = NULL;
++			continue;
++		}
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode() && (key->type != KEY_ECDSA)) {
++			printf("not loading private key: #%d type %d %s\n",
++			       i, key->type, key_type(key));
++			privkeys.host_keys[i] = NULL;
++			key_free(key);
++			key = NULL;
++			continue;
++		}
++#endif
++		switch (key->type) {
++		case KEY_RSA1:
++			privkeys.ssh1_host_key = key;
++			privkeys.have_ssh1_key = 1;
++			break;
++		case KEY_RSA:
++		case KEY_DSA:
++		case KEY_ECDSA:
++			privkeys.have_ssh2_key = 1;
++			break;
++		}
++	}
++
++	/* Load the public keys */
++	pubkeys.server_key = NULL;
++	pubkeys.ssh1_host_key = NULL;
++	pubkeys.have_ssh1_key = 0;
++	pubkeys.have_ssh2_key = 0;
++	pubkeys.host_keys = xcalloc(options.num_host_key_files,
++	    sizeof(Key *));
++	for (i = 0; i < options.num_host_key_files; i++)
++		pubkeys.host_keys[i] = NULL;
++
++	for (i = 0; i < options.num_host_key_files; i++) {
++		filename_pubkey = malloc(strlen(options.host_key_files[i])+5);
++		if (filename_pubkey == NULL) {
++			error("malloc failed");
++			return 1;
++		}
++		sprintf(filename_pubkey, "%s.pub", options.host_key_files[i]);
++		key = key_load_public(filename_pubkey, NULL);
++		free(filename_pubkey);
++		pubkeys.host_keys[i] = key;
++		if (key == NULL) {
++			error("Could not load host key: %s.pub",
++			    options.host_key_files[i]);
++			pubkeys.host_keys[i] = NULL;
++			continue;
++		}
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode() && (key->type != KEY_ECDSA)) {
++			printf("not loading public key: #%d type %d %s\n",
++			      i, key->type, key_type(key));
++			pubkeys.host_keys[i] = NULL;
++			key_free(key);
++			key = NULL;
++			continue;
++		}
++#endif
++		switch (key->type) {
++		case KEY_RSA1:
++			pubkeys.ssh1_host_key = key;
++			pubkeys.have_ssh1_key = 1;
++			break;
++		case KEY_RSA:
++		case KEY_DSA:
++		case KEY_ECDSA:
++			pubkeys.have_ssh2_key = 1;
++			break;
++		}
++	}
++
++	OpenSSL_add_all_algorithms();
++	ERR_load_crypto_strings();
++	seed_rng();
++	arc4random_stir();
++
++	for (i = 0; i < options.num_host_key_files; i++) {
++		if (privkeys.host_keys[i] == NULL ||
++		    pubkeys.host_keys[i] == NULL) {
++			continue;
++		}
++
++		if (!key_pairwise_validate(privkeys.host_keys[i],
++		                          pubkeys.host_keys[i])) {
++			failure++;
++		}
++
++		if (!key_pairwise_validate(privkeys.host_keys[i],
++		                          privkeys.host_keys[i])) {
++			failure++;
++		}
++	}
++
++	destroy_key_data(&privkeys);
++	destroy_key_data(&pubkeys);
++	return failure ? 1 : 0;
++}
++
+Index: openssh/key.c
+===================================================================
+--- openssh.orig/key.c	2015-01-02 10:13:36.116099387 -0800
++++ openssh/key.c	2015-01-02 10:13:36.176099617 -0800
+@@ -2319,3 +2319,57 @@
+ }
+ #endif /* defined(DEBUG_KEXECDH) || defined(DEBUG_PK) */
+ #endif /* OPENSSL_HAS_ECC */
++
++
++#define DATALEN 32
++int key_pairwise_validate(Key *priv, Key *pub)
++{
++	BIGNUM *bn_data;
++	u_char data[DATALEN];
++	u_char *sig = NULL;
++	u_int siglen;
++	int rv;
++
++	/* need some data so sign */
++	if ((bn_data = BN_new()) == NULL)
++		fatal("BN_new failed");
++	if (BN_rand(bn_data, DATALEN*8, 1, 1) == 0)
++		fatal("BN_rand failed");
++
++	if (priv->type == KEY_RSA1 && pub->type == KEY_RSA1) {
++		BIGNUM *bn_encrypted;
++		BIGNUM *bn_decrypted;
++
++		bn_encrypted = BN_new();
++		if (bn_encrypted == NULL)
++			fatal("BN_new failed");
++		bn_decrypted = BN_new();
++		if (bn_decrypted == NULL)
++			fatal("BN_new failed");
++
++		rsa_public_encrypt(bn_encrypted, bn_data, pub->rsa);
++		rsa_private_decrypt(bn_decrypted, bn_encrypted, priv->rsa);
++		if (BN_cmp(bn_data, bn_decrypted) == 0)
++			rv = 1;
++		else rv = 0;
++
++		BN_free(bn_decrypted);
++		BN_free(bn_encrypted);
++		goto out;
++	}
++
++	if (key_sign(priv, &sig, &siglen, data, DATALEN) != 0)
++		rv = 0;
++	else if (key_verify(pub, sig, siglen, data, DATALEN) != 1)
++		rv = 0;
++	else
++		rv = 1;
++
++	if (sig)
++		xfree(sig);
++out:
++	BN_bn2bin(bn_data, data);
++	BN_free(bn_data);
++	return rv;
++}
++
+Index: openssh/key.h
+===================================================================
+--- openssh.orig/key.h	2015-01-02 10:13:36.084099264 -0800
++++ openssh/key.h	2015-01-02 10:13:36.176099617 -0800
+@@ -153,4 +153,6 @@
+ void	key_dump_ec_key(const EC_KEY *);
+ #endif
+ 
++int	key_pairwise_validate(Key *priv, Key *pub);
++
+ #endif
+Index: openssh/sshd.c
+===================================================================
+--- openssh.orig/sshd.c	2015-01-02 10:13:36.156099541 -0800
++++ openssh/sshd.c	2015-01-02 10:13:36.176099617 -0800
+@@ -1632,6 +1632,14 @@
+ 			sensitive_data.host_keys[i] = NULL;
+ 			continue;
+ 		}
++
++		if (!key_pairwise_validate(key, key)) {
++			fprintf(stderr, "key: #%d type %d %s failed pairwise"
++			        "consistency check\n",
++			        i, key->type, key_type(key));
++			exit(1);
++		}
++
+ 		switch (key->type) {
+ 		case KEY_RSA1:
+ 			sensitive_data.ssh1_host_key = key;

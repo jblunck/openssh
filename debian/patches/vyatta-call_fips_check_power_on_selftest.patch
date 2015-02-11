@@ -1,0 +1,23 @@
+--- a/kex.c
++++ b/kex.c
+@@ -62,6 +62,10 @@
+ # endif
+ #endif
+ 
++#ifdef OPENSSL_FIPS_CAPABLE
++extern int fips_check_power_on_selftest();
++#endif
++
+ /* prototype */
+ static void kex_kexinit_finish(Kex *);
+ static void kex_choose_conf(Kex *);
+@@ -549,6 +553,9 @@
+ 	u_char *keys[NKEYS];
+ 	u_int i, mode, ctos;
+ 
++	if (FIPS_mode())
++		fips_check_power_on_selftest();
++
+ 	for (i = 0; i < NKEYS; i++) {
+ 		keys[i] = derive_key(kex, 'A'+i, kex->we_need, hash, hashlen,
+ 		    shared_secret);

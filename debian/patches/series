@@ -1,0 +1,66 @@
+# GSSAPI
+gssapi.patch
+
+# SELinux
+selinux-role.patch
+copy-id-restorecon.patch
+
+# Key blacklisting
+
+# Keepalive handling
+ssh1-keepalive.patch
+keepalive-extensions.patch
+
+# Message adjustments
+syslog-level-silent.patch
+quieter-signals.patch
+helpful-wait-terminate.patch
+
+# Miscellaneous bug fixes
+user-group-modes.patch
+scp-quoting.patch
+shell-path.patch
+dnssec-sshfp.patch
+max-startups-default.patch
+
+# Versioning
+package-versioning.patch
+debian-banner.patch
+
+# File system layout
+authorized-keys-man-symlink.patch
+lintian-symlink-pickiness.patch
+
+# Documentation
+openbsd-docs.patch
+ssh-argv0.patch
+doc-hash-tab-completion.patch
+
+# Miscellaneous bug fixes
+auth-log-verbosity.patch
+cross-pkg-config.patch
+configure-bashism.patch
+sandbox-fallback.patch
+
+# Debian-specific configuration
+no-openssl-version-check.patch
+gnome-ssh-askpass2-icon.patch
+debian-config.patch
+CVE-2014-2532.patch
+CVE-2014-2653.patch
+
+vyatta-fix-package-versioning.patch
+vyatta-fips-fingerprint_hash.patch
+vyatta-fips-openssh-6.0p1.fips-revised.patch
+vyatta-fips-fix-debian_banner.patch
+vyatta-fips-key_fingerprint-check_retval_on_digest-init.patch
+vyatta-fips_askdfvs.patch
+vyatta-FIPS_post_set_callback.patch
+vyatta-fips-premain.patch
+vyatta-call_fips_check_power_on_selftest.patch
+vyatta-fips-only.patch
+vyatta-fips-disable_ssh-rsa_ssh-dss.patch
+vyatta-FIPS_check_keysize.patch
+vyatta-keypair-check.patch
+vyatta-fips-keygen-errors.patch
+vyatta_fips_module_version.patch

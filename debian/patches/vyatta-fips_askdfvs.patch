@@ -1,0 +1,424 @@
+Index: openssh/contrib/cavp/fips_askdfvs.c
+===================================================================
+--- /dev/null
++++ openssh/contrib/cavp/fips_askdfvs.c
+@@ -0,0 +1,385 @@
++/*
++ * Copyright (c) 2014, Brocade Communications Systems, Inc.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright notice,
++ *    this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright notice,
++ *    this list of conditions and the following disclaimer in the documentation
++ *    and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
++ * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#define OPENSSL_FIPSAPI
++
++#include <stdio.h>
++#include <errno.h>
++#include <string.h>
++#include <libgen.h>
++#include <ctype.h>
++
++#include <openssl/bn.h>
++#include <openssl/crypto.h>
++
++#include "buffer.h"
++#include "cipher.h"
++#include "key.h"
++#include "kex.h"
++#include "roaming_dummy.c"
++
++#ifdef OPENSSL_FIPS_CAPABLE
++
++extern const EVP_MD *evp_ssh_sha256(void);
++extern const Newkeys *current_keys[MODE_MAX];
++
++#define TEST_MAXLINELEN 10240
++
++int parse_line(char *linebuf, char **result_key, char **result_value);
++
++int do_bn2bin(const BIGNUM *a, unsigned char *to, unsigned int len)
++{
++	unsigned char *tmp = to;
++	unsigned int i, ret;
++
++	for (i = 0 ; i < (len - BN_num_bytes(a)) ; ++i)
++		*tmp++ = 0;
++
++	ret = BN_bn2bin(a, tmp);
++	if (!ret)
++		return ret;
++
++	return len;
++}
++
++int ssh_kdf_printkeys(FILE* out, unsigned int hash_len, unsigned int iv_bits,
++		unsigned int enc_bits,
++		BIGNUM* bn_k, BIGNUM* bn_h, BIGNUM* bn_session_id)
++{
++	Kex kex;
++	unsigned int i, iv_len, enc_len, mac_len;
++	u_char *hash;
++
++	switch(hash_len) {
++	case 20:
++		kex.evp_md = EVP_sha1();
++		break;
++	case 28:
++		kex.evp_md = EVP_sha224();
++		break;
++	case 32:
++		kex.evp_md = EVP_sha256();
++		break;
++	case 48:
++		kex.evp_md = EVP_sha384();
++		break;
++	case 64:
++		kex.evp_md = EVP_sha512();
++		break;
++	default:
++		fprintf(stderr, "Unsupported hash lenght: %d\n", hash_len);
++		return 1;
++	}
++
++	iv_len = iv_bits / 8;
++	enc_len = enc_bits / 8;
++	mac_len = EVP_MD_size(kex.evp_md);
++
++	/* BN_num_bytes() just returns the number of significant bytes */
++	kex.session_id_len = hash_len;
++	kex.session_id = OPENSSL_malloc(kex.session_id_len);
++	if (!kex.session_id) {
++		fprintf(stderr, "Unable to allocate memory!\n");
++		return 1;
++	}
++	do_bn2bin(bn_session_id, kex.session_id, kex.session_id_len);
++
++	/* we_need = MAX(iv_len, enc_len, mac_len) */
++	kex.we_need = mac_len;
++	kex.we_need = kex.we_need > iv_len ? kex.we_need : iv_len;
++	kex.we_need = kex.we_need > enc_len ? kex.we_need : enc_len;
++
++	/*
++	 * MODE_IN  = client to server
++	 * MODE_OUT = server to client
++	 */
++	kex.server = 1;
++
++	hash = OPENSSL_malloc(hash_len);
++	if (!hash) {
++		fprintf(stderr, "Unable to allocate memory!\n");
++		return 1;
++	}
++	do_bn2bin(bn_h, hash, hash_len);
++
++	kex.newkeys[MODE_IN] = OPENSSL_malloc(sizeof(*(current_keys[MODE_IN])));
++	kex.newkeys[MODE_OUT] = OPENSSL_malloc(sizeof(*(current_keys[MODE_OUT])));
++
++	/*
++	 * kex_derive_keys(Kex *kex, u_char *hash, u_int hashlen,
++	 *                 BIGNUM *shared_secret)
++	 */
++	kex_derive_keys(&kex, hash, hash_len, bn_k);
++
++/*
++	current_keys[MODE_OUT]->enc.iv;    = IV lenght
++	current_keys[MODE_OUT]->enc.key;   = encryption key length
++	current_keys[MODE_OUT]->mac.key;   = EVP_MD_size length
++*/
++
++	fprintf(out, "%s = ", "Initial IV (client to server)");
++	for (i = 0; i < iv_len; i++)
++		fprintf(out, "%02x", current_keys[MODE_IN]->enc.iv[i]);
++	fputs("\n", out);
++
++	fprintf(out, "%s = ", "Initial IV (server to client)");
++	for (i = 0; i < iv_len; i++)
++		fprintf(out, "%02x", current_keys[MODE_OUT]->enc.iv[i]);
++	fputs("\n", out);
++
++	fprintf(out, "%s = ", "Encryption key (client to server)");
++	for (i = 0; i < enc_len; i++)
++		fprintf(out, "%02x", current_keys[MODE_IN]->enc.key[i]);
++	fputs("\n", out);
++
++	fprintf(out, "%s = ", "Encryption key (server to client)");
++	for (i = 0; i < enc_len; i++)
++		fprintf(out, "%02x", current_keys[MODE_OUT]->enc.key[i]);
++	fputs("\n", out);
++
++	fprintf(out, "%s = ", "Integrity key (client to server)");
++	for (i = 0; i < mac_len; i++)
++		fprintf(out, "%02x", current_keys[MODE_IN]->mac.key[i]);
++	fputs("\n", out);
++
++	fprintf(out, "%s = ", "Integrity key (server to client)");
++	for (i = 0; i < mac_len; i++)
++		fprintf(out, "%02x", current_keys[MODE_OUT]->mac.key[i]);
++	fputs("\n", out);
++	return 0;
++}
++
++int askdfvs_test(FILE* in, FILE* out)
++{
++	char *ilinebuf, *olinebuf;
++	int hash_len = 0;
++	int ss_bits = 0;
++	int iv_len = 0;
++	int enc_len = 0;
++	int count = 0;
++	BIGNUM* bn_k = NULL;
++	BIGNUM* bn_h = NULL;
++	BIGNUM* bn_session_id = NULL;
++
++	olinebuf = OPENSSL_malloc(TEST_MAXLINELEN);
++	ilinebuf = OPENSSL_malloc(TEST_MAXLINELEN);
++
++	if (!ilinebuf || !olinebuf)
++		return 1;
++
++	while (fgets(ilinebuf, TEST_MAXLINELEN, in)) {
++		char *keyword, *value;
++
++		/* save for later output */
++		strcpy(olinebuf, ilinebuf);
++
++		if (!parse_line(ilinebuf, &keyword, &value))
++			goto output;
++
++		/* do something */
++		if (!strcmp(keyword, "[shared secret length")) {
++			if ((ss_bits = atoi(value)) <= 0)
++				goto parse_error;
++		}
++		if (!strcmp(keyword, "[IV length")) {
++			if ((iv_len = atoi(value)) <= 0)
++				goto parse_error;
++		}
++		if (!strcmp(keyword, "[encryption key length")) {
++			if ((enc_len = atoi(value)) <= 0)
++				goto parse_error;
++		}
++		if (!strcmp(keyword, "COUNT")) {
++			if ((count = atoi(value)) < 0)
++				goto parse_error;
++		}
++		if (!strcmp(keyword, "K")) {
++			/*
++			 * K is a 'mpint' value: it starts (left) with a four
++			 * byte field that indicates the length of the key in
++			 * bytes.
++			 */
++			char k_size[9] = { 0 };
++			int k_len;
++			strncpy(k_size, value, 8);
++			k_len = strtol(k_size, NULL, 16);
++			value += 8 + k_len - (ss_bits/8);
++			if (bn_k || !BN_hex2bn(&bn_k, value))
++				goto parse_error;
++		}
++		if (!strcmp(keyword, "H")) {
++			/* We assume that the full digest is printed in hex */
++			hash_len = strlen(value) >> 1;
++			if (bn_h || !BN_hex2bn(&bn_h, value))
++				goto parse_error;
++		}
++		if (!strcmp(keyword, "session_id")) {
++			if (bn_session_id || !BN_hex2bn(&bn_session_id, value))
++				goto parse_error;
++		}
++
++		/* Don't repeat these lines if we parse a *.rsp file */
++		if (!strcmp(keyword, "Initial IV (client to server)"))
++			continue;
++		if (!strcmp(keyword, "Initial IV (server to client)"))
++			continue;
++		if (!strcmp(keyword, "Encryption key (client to server)"))
++			continue;
++		if (!strcmp(keyword, "Encryption key (server to client)"))
++			continue;
++		if (!strcmp(keyword, "Integrity key (client to server)"))
++			continue;
++		if (!strcmp(keyword, "Integrity key (server to client)"))
++			continue;
++
++	output:
++		if (fputs(olinebuf, out) < 0) {
++			return -1;
++		}
++
++		if (iv_len && enc_len && count >= 0 &&
++			bn_k && bn_h && bn_session_id) {
++			if (ssh_kdf_printkeys(out, hash_len, iv_len, enc_len,
++						bn_k, bn_h, bn_session_id))
++				return -1;
++
++			BN_free(bn_k);
++			bn_k = NULL;
++			BN_free(bn_h);
++			bn_h = NULL;
++			BN_free(bn_session_id);
++			bn_session_id = NULL;
++		}
++
++		continue;
++
++	parse_error:
++		fprintf(stderr, "line parse error:\n%s\n", olinebuf);
++		return -1;
++	}
++
++	return 0;
++}
++
++int parse_line(char *linebuf, char **result_key, char **result_value)
++{
++	char *key, *value, *p, *q;
++	key = linebuf;
++
++	/* skip leading spaces */
++	while (isspace((unsigned char)*key))
++		key++;
++
++	/* Look for = sign */
++	p = strchr(key, '=');
++	if (!p)
++		return 0;
++
++	q = p - 1;
++
++	/* Remove trailing space */
++	while (isspace((unsigned char)*q))
++		*q-- = 0;
++
++	*p = 0;
++	value = p + 1;
++
++	/* Remove leading space from value */
++	while (isspace((unsigned char)*value))
++		value++;
++
++	/* Remove trailing space from value */
++	p = value + strlen(value) - 1;
++
++	while (*p == '\n' || isspace((unsigned char)*p))
++		*p-- = 0;
++
++	*result_key = key;
++	*result_value = value;
++	return 1;
++}
++
++int main(int argc, char *argv[])
++{
++	FILE *in = stdin, *out = stdout;
++	int ret;
++
++	if (argc > 3) {
++		fprintf(stderr, "usage: %s [in] [out]\n", basename(argv[0]));
++		return -1;
++	}
++
++	if (argc == 2 || argc == 3) {
++		in = fopen(argv[1], "r");
++		if (!in) {
++			fprintf(stderr, "Can't open input file: %s\n",
++				strerror(errno));
++			return -1;
++		}
++	}
++	if (argc == 3) {
++		out = fopen(argv[2], "w");
++		if (!out) {
++			fprintf(stderr, "Can't open output file: %s\n",
++				strerror(errno));
++			return -1;
++		}
++	}
++
++	ret = askdfvs_test(in, out);
++	if (ret) {
++		fprintf(stderr, "ASKDFVS error\n");
++	}
++
++	if (in != stdin)
++		fclose(in);
++
++	if (out != stdout)
++		fclose(out);
++
++	return ret;
++}
++
++#else
++
++int main(int argc, char *argv[])
++{
++    printf("No FIPS KDF support\n");
++    return 0;
++}
++
++#endif
++
++void
++fatal(const char *fmt,...)
++{
++	va_list args;
++
++	va_start(args, fmt);
++	fprintf(stderr, fmt, args);
++	va_end(args);
++	exit(255);
++}
+Index: openssh/contrib/cavp/Makefile
+===================================================================
+--- /dev/null
++++ openssh/contrib/cavp/Makefile
+@@ -0,0 +1,29 @@
++#
++# This is cheap attemp to hijack the OpenSSH buildsystem for our testapps. The
++# main reason is that the OpenSSH buildsystem uses relative paths, e.g. in
++# LDFLAGS.
++#
++
++BUILD_DIR ?= ../..
++
++override CONFIGFILES =
++override MANPAGES =
++override TARGETS = fips_askdfvs
++
++include $(BUILD_DIR)/Makefile
++
++CPPFLAGS += -I$(BUILD_DIR) -I$(BUILD_DIR)/$(top_srcdir)
++
++$(BUILD_DIR)/libssh.a:
++	$(MAKE) -C $(BUILD_DIR) libssh.a
++
++ifneq (,$(LIBCOMPAT))
++DOTDOT_LIBCOMPAT=$(BUILD_DIR)/$(LIBCOMPAT)
++
++$(BUILD_DIR)/$(LIBCOMPAT):
++	$(MAKE) -C $(BUILD_DIR) $(LIBCOMPAT)
++endif
++
++# CAVS test for FIPS - not build by default
++fips_askdfvs: $(DOTDOT_LIBCOMPAT) $(BUILD_DIR)/libssh.a fips_askdfvs.o
++	( cd $(BUILD_DIR) && $(LD) -o $(top_srcdir)/contrib/cavp/$@ $(top_srcdir)/contrib/cavp/fips_askdfvs.o $(LDFLAGS) -lssh -lopenbsd-compat $(LIBS) entropy.o -lcrypto -lssl ) ;

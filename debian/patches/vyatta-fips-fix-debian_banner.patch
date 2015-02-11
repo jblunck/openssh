@@ -1,0 +1,17 @@
+From: Jan Blunck <jblunck@vyatta.com>
+Subject: vyatta-fips: Fix debian banner in SSH version string
+--- a/sshd.c
++++ b/sshd.c
+@@ -425,9 +425,9 @@
+ 		major = PROTOCOL_MAJOR_1;
+ 		minor = PROTOCOL_MINOR_1;
+ 	}
+-	snprintf(buf, sizeof buf, "SSH-%d.%d-%.100s%s%s", major, minor,
+-	    options.debian_banner ? SSH_RELEASE : SSH_RELEASE_MINIMUM,
+-	    FIPS_mode()?"(enabled)":"(capable)", newline);
++	snprintf(buf, sizeof buf, "SSH-%d.%d-%.100s%s%s%s", major, minor,
++	    SSH_RELEASE_MINIMUM, FIPS_mode()?"(enabled) ":"(capable) ",
++	    options.debian_banner ? SSH_EXTRAVERSION : "", newline);
+ 	server_version_string = xstrdup(buf);
+ 
+ 	/* Send our protocol version identification. */

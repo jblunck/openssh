@@ -1,0 +1,43 @@
+--- a/ssh-keygen.c
++++ b/ssh-keygen.c
+@@ -908,6 +908,7 @@
+ 		    hostname);
+ 		if (!key_save_private(private, identity_file, "", comment)) {
+ 			printf("Saving the key failed: %s.\n", identity_file);
++			ERR_print_errors_fp(stdout);
+ 			key_free(private);
+ 			key_free(public);
+ 			first = 0;
+@@ -1244,6 +1245,7 @@
+ 	/* Save the file using the new passphrase. */
+ 	if (!key_save_private(private, identity_file, passphrase1, comment)) {
+ 		printf("Saving the key failed: %s.\n", identity_file);
++		ERR_print_errors_fp(stdout);
+ 		memset(passphrase1, 0, strlen(passphrase1));
+ 		xfree(passphrase1);
+ 		key_free(private);
+@@ -1941,6 +1943,8 @@
+ 	extern int optind;
+ 	extern char *optarg;
+ 
++	ERR_load_crypto_strings();
++
+ #ifdef OPENSSL_FIPS_CAPABLE
+ 	/* note: there should be a command line option to indicate FIPS140
+ 	 *       mode; however OpenSSL itself uses OPENSSL_FIPS to indicate
+@@ -1951,7 +1955,6 @@
+ 	    /* make sure the error stack is available for some hint as
+ 	     * to why this operation failed
+ 	     */
+-	    ERR_load_crypto_strings();
+ 	    ERR_print_errors_fp(stdout);
+ 	    printf("FIPS_mode_set(): failed to enter FIPS mode!\n");
+ 	    exit(1);
+@@ -2354,6 +2357,7 @@
+ 	/* Save the key with the given passphrase and comment. */
+ 	if (!key_save_private(private, identity_file, passphrase1, comment)) {
+ 		printf("Saving the key failed: %s.\n", identity_file);
++		ERR_print_errors_fp(stdout);
+ 		memset(passphrase1, 0, strlen(passphrase1));
+ 		xfree(passphrase1);
+ 		exit(1);

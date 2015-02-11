@@ -1,0 +1,32 @@
+--- a/authfile.c
++++ b/authfile.c
+@@ -565,6 +565,14 @@
+ 			key_free(prv);
+ 			prv = NULL;
+ 		}
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode() && (EVP_PKEY_bits(pk) < 2048)) {
++			error("%s: RSA keysize < 2048 not allowd in FIPS mode",
++				__func__);
++			key_free(prv);
++			prv = NULL;
++		}
++#endif
+ 	} else if (pk->type == EVP_PKEY_DSA &&
+ 	    (type == KEY_UNSPEC||type==KEY_DSA)) {
+ 		prv = key_new(KEY_UNSPEC);
+@@ -574,6 +582,14 @@
+ #ifdef DEBUG_PK
+ 		DSA_print_fp(stderr, prv->dsa, 8);
+ #endif
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode() && (EVP_PKEY_bits(pk) < 2048)) {
++			error("%s: DSA keysize < 2048 not allowd in FIPS mode",
++				__func__);
++			key_free(prv);
++			prv = NULL;
++		}
++#endif
+ #ifdef OPENSSL_HAS_ECC
+ 	} else if (pk->type == EVP_PKEY_EC &&
+ 	    (type == KEY_UNSPEC||type==KEY_ECDSA)) {

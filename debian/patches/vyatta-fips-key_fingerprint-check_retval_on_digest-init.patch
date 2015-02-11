@@ -1,0 +1,27 @@
+--- a/key.c
++++ b/key.c
+@@ -406,8 +406,10 @@
+ 	}
+ 	if (blob != NULL) {
+ 		retval = xmalloc(EVP_MAX_MD_SIZE);
+-		EVP_DigestInit(&ctx, md);
+-		EVP_DigestUpdate(&ctx, blob, len);
++		if (EVP_DigestInit(&ctx, md) <= 0)
++			goto failure;
++		if (EVP_DigestUpdate(&ctx, blob, len) <= 0)
++			goto failure;
+ 		EVP_DigestFinal(&ctx, retval, dgst_raw_length);
+ 		memset(blob, 0, len);
+ 		xfree(blob);
+@@ -415,6 +417,11 @@
+ 		fatal("key_fingerprint_raw: blob is null");
+ 	}
+ 	return retval;
++ failure:
++	memset(blob, 0, len);
++	xfree(blob);
++	xfree(retval);
++	return NULL;
+ }
+ 
+ static char *

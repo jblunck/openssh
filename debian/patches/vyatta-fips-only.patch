@@ -1,0 +1,326 @@
+allow only FIPS-compliant algorithms
+--- a/myproposal.h
++++ b/myproposal.h
+@@ -94,6 +94,10 @@
+ 	"hmac-sha1-96," \
+ 	"hmac-md5-96"
+ 
++#define	KEX_FIPS_MAC \
++	SHA2_HMAC_MODES \
++	"hmac-sha1,hmac-sha1-96"
++
+ #define	KEX_DEFAULT_COMP	"none,zlib@openssh.com,zlib"
+ #define	KEX_DEFAULT_LANG	""
+ 
+@@ -103,8 +107,10 @@
+ 	"aes128-ctr,aes192-ctr,aes256-ctr," \
+ 	"aes128-cbc,3des-cbc," \
+ 	"aes192-cbc,aes256-cbc,rijndael-cbc@lysator.liu.se"
+-#define	KEX_FIPS_MAC \
+-	"hmac-sha1,hmac-sha1-96"
++
++#define KEX_FIPS_KEX \
++	KEX_ECDH_METHODS \
++	KEX_SHA256_METHODS
+ #endif /* OPENSSL_FIPS_CAPABLE */
+ 
+ 
+--- a/sshconnect2.c
++++ b/sshconnect2.c
+@@ -168,6 +168,7 @@
+ 	xxx_host = host;
+ 	xxx_hostaddr = hostaddr;
+ 
++
+ #ifdef GSSAPI
+ 	if (options.gss_keyex) {
+ 		/* Add the GSSAPI mechanisms currently supported on this 
+@@ -233,6 +234,12 @@
+ 	}
+ 	if (options.kex_algorithms != NULL)
+ 		myproposal[PROPOSAL_KEX_ALGS] = options.kex_algorithms;
++#ifdef OPENSSL_FIPS_CAPABLE
++	else if (FIPS_mode()) {
++		myproposal[PROPOSAL_KEX_ALGS] = KEX_FIPS_KEX;
++	}
++#endif /* OPENSSL_FIPS_CAPABLE */
++
+ 
+ #ifdef GSSAPI
+ 	/* If we've got GSSAPI algorithms, then we also support the
+--- a/sshd.c
++++ b/sshd.c
+@@ -2442,6 +2442,12 @@
+ 	}
+ 	if (options.kex_algorithms != NULL)
+ 		myproposal[PROPOSAL_KEX_ALGS] = options.kex_algorithms;
++#ifdef OPENSSL_FIPS_CAPABLE
++	else if (FIPS_mode()) {
++		myproposal[PROPOSAL_KEX_ALGS] = KEX_FIPS_KEX;
++	}
++#endif /* OPENSSL_FIPS_CAPABLE */
++
+ 
+ 	myproposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = list_hostkey_types();
+ 
+--- a/dh.h
++++ b/dh.h
+@@ -43,6 +43,9 @@
+ 
+ int	 dh_estimate(int);
+ 
++#ifdef OPENSSL_FIPS_CAPABLE
++# define DH_GRP_MIN_FIPS 2048
++#endif
+ #define DH_GRP_MIN	1024
+ #define DH_GRP_MAX	8192
+ 
+--- a/kex.h
++++ b/kex.h
+@@ -31,6 +31,9 @@
+ #include <openssl/hmac.h>
+ #ifdef OPENSSL_HAS_ECC
+ #include <openssl/ec.h>
++#ifdef OPENSSL_FIPS_CAPABLE
++#define ECDH_ORDER_MIN_FIPS 224
++#endif
+ #endif
+ 
+ #define KEX_COOKIE_LEN	16
+@@ -184,6 +187,9 @@
+     const BIGNUM *, u_char **, u_int *);
+ int	kex_ecdh_name_to_nid(const char *);
+ const EVP_MD *kex_ecdh_name_to_evpmd(const char *);
++# ifdef OPENSSL_FIPS_CAPABLE
++void kex_ecdh_parameters_validate_fips(const EC_GROUP *);
++# endif
+ #else
+ # define kex_ecdh_name_to_nid(x) (-1)
+ # define kex_ecdh_name_to_evpmd(x) (NULL)
+--- a/kexdhc.c
++++ b/kexdhc.c
+@@ -58,9 +58,19 @@
+ 	/* generate and send 'e', client DH public key */
+ 	switch (kex->kex_type) {
+ 	case KEX_DH_GRP1_SHA1:
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode())
++			fatal("%s: diffie-hellman-group1-sha1 not supported "
++			      "in FIPS mode.", __func__);
++#endif
+ 		dh = dh_new_group1();
+ 		break;
+ 	case KEX_DH_GRP14_SHA1:
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode())
++			fatal("%s: diffie-hellman-group14-sha1 not supported "
++			      "in FIPS mode.", __func__);
++#endif
+ 		dh = dh_new_group14();
+ 		break;
+ 	default:
+--- a/kexdhs.c
++++ b/kexdhs.c
+@@ -60,9 +60,19 @@
+ 	/* generate server DH public key */
+ 	switch (kex->kex_type) {
+ 	case KEX_DH_GRP1_SHA1:
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode())
++			fatal("%s: diffie-hellman-group1-sha1 not supported "
++			      "in FIPS mode.", __func__);
++#endif
+ 		dh = dh_new_group1();
+ 		break;
+ 	case KEX_DH_GRP14_SHA1:
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode())
++			fatal("%s: diffie-hellman-group14-sha1 not supported "
++			      "in FIPS mode.", __func__);
++#endif
+ 		dh = dh_new_group14();
+ 		break;
+ 	default:
+--- a/kexecdhc.c
++++ b/kexecdhc.c
+@@ -66,6 +66,10 @@
+ 	if (EC_KEY_generate_key(client_key) != 1)
+ 		fatal("%s: EC_KEY_generate_key failed", __func__);
+ 	group = EC_KEY_get0_group(client_key);
++#ifdef OPENSSL_FIPS_CAPABLE
++	if (FIPS_mode())
++		kex_ecdh_parameters_validate_fips(group);
++#endif
+ 
+ 	packet_start(SSH2_MSG_KEX_ECDH_INIT);
+ 	packet_put_ecpoint(group, EC_KEY_get0_public_key(client_key));
+--- a/kexecdhs.c
++++ b/kexecdhs.c
+@@ -68,6 +68,10 @@
+ 	if (EC_KEY_generate_key(server_key) != 1)
+ 		fatal("%s: EC_KEY_generate_key failed", __func__);
+ 	group = EC_KEY_get0_group(server_key);
++#ifdef OPENSSL_FIPS_CAPABLE
++	if (FIPS_mode())
++		kex_ecdh_parameters_validate_fips(group);
++#endif
+ 
+ #ifdef DEBUG_KEXECDH
+ 	fputs("server private key:\n", stderr);
+--- a/kexgexc.c
++++ b/kexgexc.c
+@@ -59,18 +59,35 @@
+ 	DH *dh;
+ 
+ 	nbits = dh_estimate(kex->we_need * 8);
++#ifdef OPENSSL_FIPS_CAPABLE
++	if (FIPS_mode()) {
++		if (kex->kex_type != KEX_DH_GEX_SHA256) {
++			fatal("%s: sha1 not allowed for key exchange in "
++			      "FIPS mode", __func__);
++		}
++	}
++#endif
+ 
+ 	if (datafellows & SSH_OLD_DHGEX) {
+ 		/* Old GEX request */
+ 		packet_start(SSH2_MSG_KEX_DH_GEX_REQUEST_OLD);
+ 		packet_put_int(nbits);
++
+ 		min = DH_GRP_MIN;
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode())
++			min = DH_GRP_MIN_FIPS;
++#endif
+ 		max = DH_GRP_MAX;
+ 
+ 		debug("SSH2_MSG_KEX_DH_GEX_REQUEST_OLD(%u) sent", nbits);
+ 	} else {
+ 		/* New GEX request */
+ 		min = DH_GRP_MIN;
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode())
++			min = DH_GRP_MIN_FIPS;
++#endif
+ 		max = DH_GRP_MAX;
+ 		packet_start(SSH2_MSG_KEX_DH_GEX_REQUEST);
+ 		packet_put_int(min);
+--- a/kexgexs.c
++++ b/kexgexs.c
+@@ -61,6 +61,15 @@
+ 	int omin = -1, min = -1, omax = -1, max = -1, onbits = -1, nbits = -1;
+ 	int type, kout;
+ 
++#ifdef OPENSSL_FIPS_CAPABLE
++	if (FIPS_mode()) {
++		if (kex->kex_type != KEX_DH_GEX_SHA256) {
++			fatal("%s: sha1 not allowed for key exchange in "
++			      "FIPS mode", __func__);
++		}
++	}
++#endif
++
+ 	if (kex->load_host_public_key == NULL ||
+ 	    kex->load_host_private_key == NULL)
+ 		fatal("Cannot load hostkey");
+@@ -90,6 +99,10 @@
+ 		onbits = nbits = packet_get_int();
+ 		/* unused for old GEX */
+ 		omin = min = DH_GRP_MIN;
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode())
++			omin = min = DH_GRP_MIN_FIPS;
++#endif
+ 		omax = max = DH_GRP_MAX;
+ 		break;
+ 	default:
+@@ -101,6 +114,15 @@
+ 		fatal("DH_GEX_REQUEST, bad parameters: %d !< %d !< %d",
+ 		    omin, onbits, omax);
+ 
++#ifdef OPENSSL_FIPS_CAPABLE
++	if (FIPS_mode()) {
++		if (min < DH_GRP_MIN_FIPS) {
++			fatal("%s: DH_GEX group out of range (FIPS): %d !< %d",
++			      __func__, DH_GRP_MIN_FIPS, min);
++		}
++	}
++#endif
++
+ 	/* Contact privileged parent */
+ 	dh = PRIVSEP(choose_dh(min, nbits, max));
+ 	if (dh == NULL)
+--- a/kexecdh.c
++++ b/kexecdh.c
+@@ -114,4 +114,50 @@
+ 	*hashlen = EVP_MD_size(evp_md);
+ }
+ 
++#ifdef OPENSSL_FIPS_CAPABLE
++void
++kex_ecdh_parameters_validate_fips(const EC_GROUP *group)
++{
++	BIGNUM *order;
++	BIGNUM *cofactor;
++	int orderlen;
++	int cofactor_maxlen;
++
++	order = BN_new();
++	if (order == NULL)
++		fatal("%s: BN_new() failed (order)", __func__);
++	cofactor = BN_new();
++	if (cofactor == NULL)
++		fatal("%s: BN_new() failed (cofactor)", __func__);
++	if (EC_GROUP_get_order(group, order, NULL) != 1)
++		fatal("%s: EC_GROUP_get_order failed", __func__);
++	orderlen = BN_num_bits(order);
++	if (orderlen < ECDH_ORDER_MIN_FIPS)
++		fatal("%s: (FIPS) order %d < %d", __func__,
++		      orderlen, ECDH_ORDER_MIN_FIPS);
++	debug("%s: order %d >= %d", __func__, orderlen,
++	      ECDH_ORDER_MIN_FIPS);
++
++	if (orderlen >= 512)
++		cofactor_maxlen = 512/16;
++	else if (orderlen >= 384)
++		cofactor_maxlen = 384/16;
++	else if (orderlen >= 256)
++		cofactor_maxlen = 256/16;
++	else
++		cofactor_maxlen = 224/16;
++	if (EC_GROUP_get_cofactor(group, cofactor, NULL) != 1)
++		fatal("%s: EC_GROUP_get_cofactor failed", __func__);
++	if (BN_num_bits(cofactor) > cofactor_maxlen)
++		fatal("%s: (FIPS) cofactor too large %d > %d",
++		      __func__, BN_num_bits(cofactor), cofactor_maxlen);
++	debug("%s: cofactor len %d",
++	      __func__, BN_num_bits(cofactor));
++	BN_free(cofactor);
++	BN_free(order);
++
++	return;
++}
++#endif /* OPENSSL_FIPS_CAPABLE */
++
+ #endif /* OPENSSL_HAS_ECC */
+--- a/ssh-keygen.c
++++ b/ssh-keygen.c
+@@ -884,10 +884,16 @@
+ 			first = 1;
+ 			printf("%s: generating new host keys: ", __progname);
+ 		}
+-		printf("%s ", key_types[i].key_type_display);
+-		fflush(stdout);
+ 		arc4random_stir();
+ 		type = key_type_from_name(key_types[i].key_type);
++#ifdef OPENSSL_FIPS_CAPABLE
++		if (FIPS_mode())
++			if (type == KEY_RSA1 || type == KEY_RSA
++			    || type == KEY_DSA)
++				continue;
++#endif
++		printf("%s ", key_types[i].key_type_display);
++		fflush(stdout);
+ 		strlcpy(identity_file, key_types[i].path, sizeof(identity_file));
+ 		bits = 0;
+ 		type_bits_valid(type, &bits);

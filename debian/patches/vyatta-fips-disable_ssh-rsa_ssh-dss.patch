@@ -1,0 +1,41 @@
+From: Jan Blunck <jblunck@vyatta.com>
+Subject: Prevent usage of SHA-1 when generating signatures
+
+FIPS SP 800-131A disallows the usage of SHA-1 in signature generation after
+January 1st 2014. Signature verification is still allowed.
+--- a/ssh-dss.c
++++ b/ssh-dss.c
+@@ -62,6 +62,15 @@
+ 		error("ssh_dss_sign: no DSA key");
+ 		return -1;
+ 	}
++
++#ifdef OPENSSL_FIPS_CAPABLE
++	if (FIPS_mode()) {
++		error("%s: Generating DSA signatures with SHA-1 not allowed "
++			"in FIPS mode.", __func__);
++		return -1;
++	}
++#endif
++
+ 	pkey = EVP_PKEY_new();
+ 	EVP_PKEY_set1_DSA(pkey, key->dsa);
+ 	slen = EVP_PKEY_size(pkey);
+--- a/ssh-rsa.c
++++ b/ssh-rsa.c
+@@ -58,6 +58,15 @@
+ 		error("ssh_rsa_sign: EVP_get_digestbynid %d failed", nid);
+ 		return -1;
+ 	}
++
++#ifdef OPENSSL_FIPS_CAPABLE
++	if (FIPS_mode()) {
++		error("%s: Generating RSA signatures with SHA-1 not allowed "
++			"in FIPS mode.", __func__);
++		return -1;
++	}
++#endif
++
+ 	pkey = EVP_PKEY_new();
+ 	EVP_PKEY_set1_RSA(pkey, key->rsa);
+ 	slen = EVP_PKEY_size(pkey);
